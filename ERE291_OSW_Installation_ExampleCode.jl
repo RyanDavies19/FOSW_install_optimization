@@ -13,7 +13,8 @@ Priority of work:
 ####################################
 ######### Initialize tools #########
 ####################################
-using JuMP
+using CSV
+using DataFrames
 using Cbc
 using PyFormattedStrings # to get python style f-string formatting
 using Plots
@@ -47,6 +48,8 @@ Time = collect(TimeStart:TimeEnd)
 nTime = length(Time)
 
 # TODO: Set of weather conditions
+weather_df = CSV.read("gulf_of_maine_weather_states_daily.csv", DataFrame)
+weatherSequence = weather_df.weather_state[1:nTime]
 
 # TODO: Sets of turbines in strings
 
@@ -57,8 +60,40 @@ Tasks = [1, 2, 3] # 1: cable installation (disabled for now), 2: mooring install
 nTasks = length(Tasks)
 
 # Set of vessels
-Vessels = ["a", "b", "c"]
+vessels_df = CSV.read("vessel_data.csv", DataFrame)
+
+# Basic vessel parameters
+Vessels  = vessels_df.vesselType
 nVessels = length(Vessels)
+dayRates = vessels_df.dayRate
+maxWind  = vessels_df.maxWind
+maxWave  = vessels_df.maxWave
+
+# Task capability matrix — 1 if vessel can do that task
+# Columns correspond to Tasks = [mooring, hookup, cable]
+taskCapable = Matrix(vessels_df[:, [:mooreInstall, :platformHookup, :cableInstall]])
+
+# Weather state thresholds — from GEE analysis
+# State 1 (Good):     wind < 8,  wave < 2
+# State 2 (Marginal): wind 8-16, wave 2-3
+# State 3 (Bad):      wind > 16, wave > 3
+# A vessel can operate in state s if its limits exceed the WORST conditions
+# possible in that state, i.e., the upper bound of the state's range.
+# State 1: worst case is wind=8, wave=2  → vessel needs maxWind>=8,  maxWave>=2
+# State 2: worst case is wind=16, wave=3 → vessel needs maxWind>=16, maxWave>=3
+# State 3: worst case is wind=Inf, wave=Inf → no vessel can guarantee operability
+stateWorstWind = [8.0,  16.0, Inf]  # upper bound wind for each state
+stateWorstWave = [2.0,   3.0, Inf]  # upper bound wave for each state
+
+# vesselOperability[v, s] = 1 if vessel v can operate in ALL conditions in state s
+vesselOperability = zeros(Int, nVessels, 3)
+for v in 1:nVessels
+    for s in 1:3
+        if maxWind[v] >= stateWorstWind[s] && maxWave[v] >= stateWorstWave[s]
+            vesselOperability[v, s] = 1
+        end
+    end
+end
 
 ###################################################
 ############ Define Parameters and Data ###########
@@ -81,6 +116,11 @@ cCosts = [int_inf, int_inf,      20]  # Vessel C costs per task [$]
 taskCosts = [aCosts, bCosts, cCosts]
 
 # TODO: Add in weather constraints for each vessel
+vesselOperability = [
+  1 1 1;   # AHTS: all states
+  1 1 0;   # CSV/hookup vessel: Good and Marginal only
+  1 1 0;   # Cable Lay Vessel: Good and Marginal only (tight wave limit)
+]
 
 # Check arrays and sizes
 @assert (length(aDurations) == nTasks && 
