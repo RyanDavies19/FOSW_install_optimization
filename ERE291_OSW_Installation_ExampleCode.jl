@@ -56,22 +56,41 @@ nTime = length(Time)
 Tasks = [1, 2, 3] # 1: cable installation (disabled for now), 2: mooring installation, 3: platform hook-up
 nTasks = length(Tasks)
 
+# Set of vessels
+Vessels = ["a", "b", "c"]
+nVessels = length(Vessels)
+
 ###################################################
 ############ Define Parameters and Data ###########
 ###################################################
 
-# Task durations: how many timesteps each task takes at each turbine TODO: make these realistic for the difference vessel types based on table 5.9
-taskDurations = [3, 4, 5] # example durations for each task [units of timesteps]
+# Integer representation of inifintely high value. Useful for big M method
+int_inf = typemax(Int)
+
+# Task durations by vessel: how many timesteps each task takes at each turbine (0 disables the vessel for that task)
+# TODO: make these realistic for the difference vessel types based on table 5.9
+aDurations = [3, 0, 0] # durations for each task [units of timesteps]
+bDurations = [0, 4, 0] # durations for each task [units of timesteps]
+cDurations = [0, 0, 5] # durations for each task [units of timesteps]
+taskDurations = [aDurations, bDurations, cDurations]
 
 # Task costs: how much does it cost to do each task
-taskCosts = [10, 50, 20]  # [$]
+aCosts = [     10, int_inf, int_inf]  # Vessel A costs per task [$]
+bCosts = [int_inf,      50, int_inf]  # Vessel B costs per task [$]
+cCosts = [int_inf, int_inf,      20]  # Vessel C costs per task [$]
+taskCosts = [aCosts, bCosts, cCosts]
 
 # TODO: Add in weather constraints for each vessel
 
-# TODO: Add in cost coefficients the different vessels
-
 # Check arrays and sizes
-@assert length(taskDurations) == nTasks || throw("ERROR: Durations and Task must be same size")
+@assert (length(aDurations) == nTasks && 
+        length(bDurations) == nTasks && 
+        length(cDurations) == nTasks) || "ERROR: Vessel task durations and tasks must be same size"
+@assert (length(aCosts) == nTasks && 
+        length(bCosts) == nTasks && 
+        length(cCosts) == nTasks) || "ERROR: Vessel task durations and tasks must be same size"
+@assert (length(taskDurations) == nVessels &&
+        length(taskCosts) == nVessels) || throw("ERROR: Costs, durations, and vessles must be same size")
 
 """
     optimizer(w1)
@@ -100,8 +119,8 @@ function optimizer(w1) # crudely put the whole thing in a function for looping
     ######## Decision variables ########
     ####################################
 
-    # x_i,k,t: A binary variable that equals 1 if task k at turbine i is active during timestep t, and 0 otherwise.
-    @variable(m, x[1:nTurbines, 1:nTasks, 1:nTime], Bin)
+    # x_i,k,v,t: A binary variable that equals 1 if task k at turbine i is being completed by vessel v during timestep t, and 0 otherwise.
+    @variable(m, x[1:nTurbines, 1:nTasks, 1:nVessels, 1:nTime], Bin)
 
     ######################################
     ######## Objective Function ##########
@@ -111,8 +130,9 @@ function optimizer(w1) # crudely put the whole thing in a function for looping
     # Check valid weight
     @assert (w1 <= 1 && w1 >= 0) || throw("ERROR: weight must be between 0 and 1")
 
-    # Minimize total installation time using a time penalty approach
-    @objective(m, Min, w1 * sum(x[i,k,t]*t for i = 1:nTurbines, k = 1:nTasks, t = 1:nTime) + (1-w1) * sum(x[i,k,t]*taskCosts[k] for i = 1:nTurbines, k = 1:nTasks, t = 1:nTime))
+    # Minimize total installation time using a time penalty and cost penalty approach
+    @objective(m, Min, w1 * sum(x[i,k,v,t]*t for i = 1:nTurbines, k = 1:nTasks, v = 1:nVessels, t = 1:nTime) + 
+                (1-w1) * sum(x[i,k,v,t]*taskCosts[v][k] for i = 1:nTurbines, k = 1:nTasks, v = 1:nVessels, t = 1:nTime))
 
     ######################################
     ############# Constraints ############
@@ -120,16 +140,16 @@ function optimizer(w1) # crudely put the whole thing in a function for looping
     # Some of these are inspired by Housner et al. (2026), a forthcoming paper
 
     # Task Completion: sum of xi,k,t over all timesteps t must equal the required duration for task k. This also ensures each task is only completed once.
-    @constraint(m, [i=1:nTurbines, k=1:nTasks], sum(x[i,k,t] for t = 1:nTime) == taskDurations[k])
+    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels,], sum(x[i,k,v,t] for t = 1:nTime) == taskDurations[v][k])
 
     # Continuous tasks: Once a task stops, it cannot start again. tt is the time steps after t.
-    @constraint(m, [i=1:nTurbines, k=1:nTasks, t=2:nTime, tt=t+1:nTime], x[i,k,tt] <= x[i,k,t] - x[i,k,t-1] + 1)
+    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=2:nTime, tt=t+1:nTime], x[i,k,v,tt] <= x[i,k, v, t] - x[i,k,v,t-1] + 1)
 
     # Dependency: Task k+1 cannot begin until task k is fully completed at turbine i. If task k+1 is active at t, then the sum of task k times to t-1 needs to be taskDurations.
-    @constraint(m, [i=1:nTurbines, k=1:nTasks-1,  t=1:nTime], x[i,k+1,t] * taskDurations[k] <= sum(x[i,k,tt] for tt=1:t-1))
+    @constraint(m, [i=1:nTurbines, k=1:nTasks-1, v=1:nVessels, t=1:nTime], x[i,k+1,v,t] * taskDurations[v][k] <= sum(x[i,k,v,tt] for tt=1:t-1))
 
-    # Resource Limit: sum of active tasks cannot exceed your available vessels (e.g., you only have 1 cable-laying vessel, so only one turbine can have Task 1 active per timestep).
-    @constraint(m, [t=1:nTime, k=1:nTasks],sum(x[i,k,t] for i = 1:nTurbines) <= 1)
+    # Resource Limit: sum of active tasks (across all turbines) cannot exceed your available vessels (e.g., you only have 1 cable-laying vessel, so only one turbine can have Task 1 active per timestep).
+    @constraint(m, [t=1:nTime, v=1:nVessels], sum(x[i,k,v,t] for i = 1:nTurbines, k = 1:nTasks) <= 1)
 
     ######################################
     ########### Print and solve ##########
@@ -152,15 +172,23 @@ objective, x = optimizer(1)
 # Make a nice looking Gantt chart w/ f-strings
 taskNames = ["Mooring Install", "Platform Hook-up", "Cable Install", ] # strings must be <16 char
 println("--- Gantt Chart ---")
-header = "Turbine |       Task       |" * join([f" {t:2d}" for t in Time], "")
+header = "Turbine |       Task       | Vessel |" * join([f" {t:2d}" for t in Time], "")
 println(header)
 println("-" ^ length(header))
 
 for i in 1:nTurbines
     for k in 1:nTasks
-        print(f"   {i:2d}   | {taskNames[k]:16s} |")
+        # Find which vessel is assigned to this (turbine, task) pair
+        assigned_vessel = "-"
+        for v in 1:nVessels
+            if sum(round(Int, x[i, k, v, t]) for t in 1:nTime) > 0 # round is needed because value(x) returns float
+                assigned_vessel = Vessels[v]
+                break
+            end
+        end
+        print(f"   {i:2d}   | {taskNames[k]:16s} |   {assigned_vessel:1s}    |")
         for t in 1:nTime
-            val = round(Int, x[i, k, t])
+            val = sum(round(Int, x[i, k, v, t]) for v in 1:nVessels)
             cell = val == 1 ? "  X" : "  ."
             print(cell)
         end
