@@ -44,7 +44,7 @@ nTurbines = length(Turbines)
 
 # Set of timesteps
 TimeStart = 1
-TimeEnd = 30
+TimeEnd = 1000
 Time = collect(TimeStart:TimeEnd)
 nTime = length(Time)
 
@@ -80,6 +80,7 @@ baseDurations = [3, 4, 5]  # [mooreInstall, platformHookup, cableInstall]
 
 # taskDurations[v][k] = duration for vessel v doing task k
 # If vessel can't do the task (taskCapable == 0), duration is 0
+taskCapable = Matrix(vessels_df[:, [:mooreInstall, :platformHookup, :cableInstall]])
 taskDurations = [taskCapable[v, :] .* baseDurations for v in 1:nVessels]
 
 # Task costs: how much does it cost to do each task
@@ -96,9 +97,6 @@ taskCosts = [
 # Add in weather constraints for each vessel
 maxWind  = vessels_df.maxWind
 maxWave  = vessels_df.maxWave
-
-# Task capability matrix — 1 if vessel can do that task
-taskCapable = Matrix(vessels_df[:, [:mooreInstall, :platformHookup, :cableInstall]])
 
 # Weather state thresholds — from GEE analysis
 stateWorstWind = [8.0,  16.0, Inf]  # upper bound wind for each state
@@ -118,14 +116,10 @@ end
 weather = [vesselOperability[v, weatherSequence[t]] for v in 1:nVessels, t in 1:nTime]
 
 # Check arrays and sizes
-@assert (length(aDurations) == nTasks && 
-        length(bDurations) == nTasks && 
-        length(cDurations) == nTasks) || "ERROR: Vessel task durations and tasks must be same size"
-@assert (length(aCosts) == nTasks && 
-        length(bCosts) == nTasks && 
-        length(cCosts) == nTasks) || "ERROR: Vessel task durations and tasks must be same size"
-@assert (length(taskDurations) == nVessels &&
-        length(taskCosts) == nVessels) || throw("ERROR: Costs, durations, and vessles must be same size")
+@assert length(taskDurations) == nVessels "ERROR: taskDurations must have one entry per vessel"
+@assert length(taskCosts) == nVessels "ERROR: taskCosts must have one entry per vessel"
+@assert all(length(taskDurations[v]) == nTasks for v in 1:nVessels) "ERROR: each vessel must have one duration per task"
+@assert all(length(taskCosts[v]) == nTasks for v in 1:nVessels) "ERROR: each vessel must have one cost per task"
 
 """
     optimizer(w1)
@@ -194,6 +188,7 @@ function optimizer(w1) # crudely put the whole thing in a function for looping
     ######################################
 
     # print(m)
+    set_optimizer_attribute(m, "seconds", 120)
 
     optimize!(m)
 
@@ -205,7 +200,7 @@ function optimizer(w1) # crudely put the whole thing in a function for looping
 end
 
 # Run function for time optimization
-objective, x = optimizer(1, weatherSequence, vesselOperability)
+objective, x = optimizer(1)
 
 # Make a nice looking Gantt chart w/ f-strings
 taskNames = ["Mooring Install", "Platform Hook-up", "Cable Install", ] # strings must be <16 char
