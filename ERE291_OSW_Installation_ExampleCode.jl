@@ -15,6 +15,7 @@ Priority of work:
 ####################################
 using CSV
 using DataFrames
+using JuMP
 using Cbc
 using PyFormattedStrings # to get python style f-string formatting
 using Plots
@@ -71,22 +72,28 @@ nVessels = length(Vessels)
 # Integer representation of inifintely high value. Useful for big M method
 int_inf = typemax(Int)
 
+# KH NOTE: Updated task durations & task remove hardcoding & pull in CSV vessel data.
+
 # Task durations by vessel: how many timesteps each task takes at each turbine (0 disables the vessel for that task)
 # TODO: make these realistic for the difference vessel types based on table 5.9
-aDurations = [2, 0, 0] # durations for each task [units of timesteps]
-bDurations = [0, 2, 0] # durations for each task [units of timesteps]
-cDurations = [0, 0, 1] # durations for each task [units of timesteps]
-taskDurations = [aDurations, bDurations, cDurations]
+baseDurations = [3, 4, 5]  # [mooreInstall, platformHookup, cableInstall]
 
-## KH NOTE: Updated task costs to pull in the actual day rates from the vessel data csv.
+# taskDurations[v][k] = duration for vessel v doing task k
+# If vessel can't do the task (taskCapable == 0), duration is 0
+taskDurations = [taskCapable[v, :] .* baseDurations for v in 1:nVessels]
+
 # Task costs: how much does it cost to do each task
+# taskCosts[v][k] = cost for vessel v doing task k per timestep
+# If vessel can't do the task, cost is int_inf
+# Divide day rateby 2 because timesteps are 12-hour intervals, not full days
 dayRates = vessels_df.dayRate
-aCosts = [dayRates[1]/2, int_inf, int_inf]  # Vessel A costs per task [$]
-bCosts = [int_inf, dayRates[2]/2, int_inf]  # Vessel B costs per task [$]
-cCosts = [int_inf, int_inf, dayRates[3]/2]  # Vessel C costs per task [$]
-taskCosts = [aCosts, bCosts, cCosts]
+taskCosts = [
+    [taskCapable[v, k] == 1 ? dayRates[v] / 2 : int_inf 
+     for k in 1:nTasks]
+    for v in 1:nVessels
+]
 
-# TODO: Add in weather constraints for each vessel
+# Add in weather constraints for each vessel
 maxWind  = vessels_df.maxWind
 maxWave  = vessels_df.maxWave
 
@@ -131,7 +138,7 @@ Returns:
     - `ObjValue`: (Float) Optimal objective value
     - `x_return`: (Array) Optimal schedule
 """
-function optimizer(w1, weatherSequence, vesselOperability) # crudely put the whole thing in a function for looping
+function optimizer(w1) # crudely put the whole thing in a function for looping
 
     ####################################
     ########## Declare model  ##########
