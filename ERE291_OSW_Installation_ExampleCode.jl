@@ -107,6 +107,9 @@ for v in 1:nVessels
     end
 end
 
+# Create a weather operability matrix for each vessel and time step, based on the weather sequence and vessel operability by state
+weather = [vesselOperability[v, weatherSequence[t]] for v in 1:nVessels, t in 1:nTime]
+
 # Check arrays and sizes
 @assert (length(aDurations) == nTasks && 
         length(bDurations) == nTasks && 
@@ -128,7 +131,7 @@ Returns:
     - `ObjValue`: (Float) Optimal objective value
     - `x_return`: (Array) Optimal schedule
 """
-function optimizer(w1) # crudely put the whole thing in a function for looping
+function optimizer(w1, weatherSequence, vesselOperability) # crudely put the whole thing in a function for looping
 
     ####################################
     ########## Declare model  ##########
@@ -176,6 +179,9 @@ function optimizer(w1) # crudely put the whole thing in a function for looping
     # Resource Limit: sum of active tasks (across all turbines) cannot exceed your available vessels (e.g., you only have 1 cable-laying vessel, so only one turbine can have Task 1 active per timestep).
     @constraint(m, [t=1:nTime, v=1:nVessels], sum(x[i,k,v,t] for i = 1:nTurbines, k = 1:nTasks) <= 1)
 
+    # Weather constraints: if weather conditions at time t prevent vessel v from operating, then x[i,k,v,t] must be 0 for all i and k. We can use the weather operability matrix we created above to enforce this.
+    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime], x[i,k,v,t] <= weather[v,t])
+    
     ######################################
     ########### Print and solve ##########
     ######################################
@@ -192,7 +198,7 @@ function optimizer(w1) # crudely put the whole thing in a function for looping
 end
 
 # Run function for time optimization
-objective, x = optimizer(1)
+objective, x = optimizer(1, weatherSequence, vesselOperability)
 
 # Make a nice looking Gantt chart w/ f-strings
 taskNames = ["Mooring Install", "Platform Hook-up", "Cable Install", ] # strings must be <16 char
