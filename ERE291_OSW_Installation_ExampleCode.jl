@@ -47,13 +47,11 @@ TimeEnd = 30
 Time = collect(TimeStart:TimeEnd)
 nTime = length(Time)
 
-# TODO: Set of weather conditions
-weather_df = CSV.read("gulf_of_maine_weather_states_daily.csv", DataFrame)
+# Set of weather conditions (12-hour timesteps, based on GEE analysis of Gulf of Maine data)
+weather_df = CSV.read("gulf_of_maine_weather_states_12hourly.csv", DataFrame)
 weatherSequence = weather_df.weather_state[1:nTime]
 
 # TODO: Sets of turbines in strings
-
-# TODO: Set of vessels (with backup vessels that can handle worse conditions but are more expensive)
 
 # Set of tasks
 Tasks = [1, 2, 3] # 1: cable installation (disabled for now), 2: mooring installation, 3: platform hook-up
@@ -64,6 +62,8 @@ vessels_df = CSV.read("vessel_data.csv", DataFrame)
 Vessels  = vessels_df.vesselType
 nVessels = length(Vessels)
 
+# TODO: Add backup vessels that can handle worse conditions but are more expensive
+
 ###################################################
 ############ Define Parameters and Data ###########
 ###################################################
@@ -73,20 +73,20 @@ int_inf = typemax(Int)
 
 # Task durations by vessel: how many timesteps each task takes at each turbine (0 disables the vessel for that task)
 # TODO: make these realistic for the difference vessel types based on table 5.9
-aDurations = [3, 0, 0] # durations for each task [units of timesteps]
-bDurations = [0, 4, 0] # durations for each task [units of timesteps]
-cDurations = [0, 0, 5] # durations for each task [units of timesteps]
+aDurations = [2, 0, 0] # durations for each task [units of timesteps]
+bDurations = [0, 2, 0] # durations for each task [units of timesteps]
+cDurations = [0, 0, 1] # durations for each task [units of timesteps]
 taskDurations = [aDurations, bDurations, cDurations]
 
+## KH NOTE: Updated task costs to pull in the actual day rates from the vessel data csv.
 # Task costs: how much does it cost to do each task
-aCosts = [     10, int_inf, int_inf]  # Vessel A costs per task [$]
-bCosts = [int_inf,      50, int_inf]  # Vessel B costs per task [$]
-cCosts = [int_inf, int_inf,      20]  # Vessel C costs per task [$]
+dayRates = vessels_df.dayRate
+aCosts = [dayRates[1]/2, int_inf, int_inf]  # Vessel A costs per task [$]
+bCosts = [int_inf, dayRates[2]/2, int_inf]  # Vessel B costs per task [$]
+cCosts = [int_inf, int_inf, dayRates[3]/2]  # Vessel C costs per task [$]
 taskCosts = [aCosts, bCosts, cCosts]
 
 # TODO: Add in weather constraints for each vessel
-# Vessel parameters
-dayRates = vessels_df.dayRate
 maxWind  = vessels_df.maxWind
 maxWave  = vessels_df.maxWave
 
