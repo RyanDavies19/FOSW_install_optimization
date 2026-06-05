@@ -44,7 +44,7 @@ nTurbines = length(Turbines)
 
 # Set of timesteps
 TimeStart = 1
-TimeEnd = 1000
+TimeEnd = 100
 Time = collect(TimeStart:TimeEnd)
 nTime = length(Time)
 
@@ -76,7 +76,7 @@ int_inf = typemax(Int)
 
 # Task durations by vessel: how many timesteps each task takes at each turbine (0 disables the vessel for that task)
 # TODO: make these realistic for the difference vessel types based on table 5.9
-baseDurations = [3, 4, 5]  # [mooreInstall, platformHookup, cableInstall]
+baseDurations = [2, 2, 1]  # [mooreInstall, platformHookup, cableInstall]
 
 # taskDurations[v][k] = duration for vessel v doing task k
 # If vessel can't do the task (taskCapable == 0), duration is 0
@@ -99,7 +99,7 @@ maxWind  = vessels_df.maxWind
 maxWave  = vessels_df.maxWave
 
 # Weather state thresholds — from GEE analysis
-stateWorstWind = [8.0,  16.0, Inf]  # upper bound wind for each state
+stateWorstWind = [10.0,  20.0, Inf]  # upper bound wind for each state
 stateWorstWave = [2.0,   3.0, Inf]  # upper bound wave for each state
 
 # vesselOperability[v, s] = 1 if vessel v can operate in ALL conditions in state s
@@ -232,14 +232,11 @@ end
 
 # Solve for 10 weights, to get Pareto front
 nWeights = 10
-time_objectives = []
-cost_objectives = []
 for i in 1:nWeights
     println(f"Optimizing for weight index {i}")
-    objective, x = optimizer(i / nWeights)
-    # Compute individual objectives
-    time_obj = sum(x[i,k,t]*t for i = 1:nTurbines, k = 1:nTasks, t = 1:nTime)
-    cost_obj = sum(x[i,k,t]*taskCosts[k] for i = 1:nTurbines, k = 1:nTasks, t = 1:nTime)
+    local objective, x = optimizer(i / nWeights)
+    time_obj = sum(x[ii,k,v,t]*t for ii=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime)
+    cost_obj = sum(x[ii,k,v,t]*taskCosts[v][k] for ii=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime)
     push!(time_objectives, time_obj)
     push!(cost_objectives, cost_obj)
 end
@@ -255,4 +252,3 @@ scatter(time_objectives, cost_objectives,
 )
 
 savefig("pareto.png")
-
