@@ -3,11 +3,12 @@
 
 """
 Priority of work:
-- [] 1. Set of weather conditions
-- [] 2. More realistic task lengths, and more vessel types
-- [] 3. Cost function for install
-- [] 4. Sets of turbines in strings
-- [] 5. Time permitting: emissions
+- [X] 1. Set of weather conditions
+- [X] 2. More realistic task lengths and vessel costs
+- [X] 3. Cost function for install (right now are fixed because they are tied to tasks and all vessels are the same for the tasks)
+- [ ] 4. Sets of turbines in strings
+- [ ] 5. Distance between turbines and port in the cost (this will make a more meaningful patero for the costs)
+- [ ] 6. Time permitting: emissions
 """
 
 ####################################
@@ -43,25 +44,35 @@ Turbines = collect(1:maxTurbines)
 nTurbines = length(Turbines)
 
 # Set of timesteps
-TimeStart = 1
-TimeEnd = 100
+TimeStart = 200 # RD: 0-200 has a lot of infeasible seastates
+TimeEnd = 215
 Time = collect(TimeStart:TimeEnd)
 nTime = length(Time)
 
 # Set of weather conditions (12-hour timesteps, based on GEE analysis of Gulf of Maine data)
 weather_df = CSV.read("gulf_of_maine_weather_states_12hourly.csv", DataFrame)
-weatherSequence = weather_df.weather_state[1:nTime]
+weatherSequence = weather_df.weather_state[TimeStart:TimeEnd]
 
 # TODO: Sets of turbines in strings
 
 # Set of tasks
-Tasks = [1, 2, 3] # 1: cable installation (disabled for now), 2: mooring installation, 3: platform hook-up
+Tasks = [1, 2, 3] # 1: cable installation, 2: mooring installation, 3: platform hook-up 
+# TODO: error check to make sure data columns match tasks. Cable install should happen first.
 nTasks = length(Tasks)
 
-# Set of vessels
-vessels_df = CSV.read("vessel_data.csv", DataFrame)
-Vessels  = vessels_df.vesselType
-nVessels = length(Vessels)
+# Set of vessel types
+VesselTypes = CSV.read("vessel_data.csv", DataFrame)
+nVesselTypes = nrow(VesselTypes)
+
+# Set of vessels (repeats each VesselType row numVessel times)
+rows = Int[]
+for type in 1:nVesselTypes
+    for num in 1:VesselTypes.numVessel[type]
+        push!(rows, type)
+    end
+end
+Vessels = VesselTypes[rows, :]
+nVessels = nrow(Vessels)
 
 # TODO: Add backup vessels that can handle worse conditions but are more expensive
 
@@ -74,33 +85,33 @@ int_inf = typemax(Int)
 
 # KH NOTE: Updated task durations & task remove hardcoding & pull in CSV vessel data.
 
-# Task durations by vessel: how many timesteps each task takes at each turbine (0 disables the vessel for that task)
+# Task durations by vessel type: how many timesteps each task takes at each turbine (0 disables the vessel for that task)
 # TODO: make these realistic for the difference vessel types based on table 5.9
-baseDurations = [2, 2, 1]  # [mooreInstall, platformHookup, cableInstall]
+baseDurations = [2, 2, 1]  # [moorInstall, platformHookup, cableInstall]
 
 # taskDurations[v][k] = duration for vessel v doing task k
 # If vessel can't do the task (taskCapable == 0), duration is 0
-taskCapable = Matrix(vessels_df[:, [:mooreInstall, :platformHookup, :cableInstall]])
+taskCapable = Matrix(Vessels[:, [:moorInstall, :platformHookup, :cableInstall]])
 taskDurations = [taskCapable[v, :] .* baseDurations for v in 1:nVessels]
 
 # Task costs: how much does it cost to do each task
 # taskCosts[v][k] = cost for vessel v doing task k per timestep
 # If vessel can't do the task, cost is int_inf
-# Divide day rateby 2 because timesteps are 12-hour intervals, not full days
-dayRates = vessels_df.dayRate
+# Divide day rate by 2 because timesteps are 12-hour intervals, not full days
+dayRates = Vessels.dayRate
 taskCosts = [
     [taskCapable[v, k] == 1 ? dayRates[v] / 2 : int_inf 
      for k in 1:nTasks]
     for v in 1:nVessels
 ]
 
-# Add in weather constraints for each vessel
-maxWind  = vessels_df.maxWind
-maxWave  = vessels_df.maxWave
+# Add in weather constraints for each vessel type
+maxWind  = Vessels.maxWind
+maxWave  = Vessels.maxWave
 
-# Weather state thresholds — from GEE analysis
-stateWorstWind = [10.0,  20.0, Inf]  # upper bound wind for each state
-stateWorstWave = [2.0,   3.0, Inf]  # upper bound wave for each state
+# Weather state thresholds (three weather states) — from GEE analysis
+stateWorstWind = [10.0, 20.0, Inf]  # upper bound wind for each state
+stateWorstWave = [ 2.0,  3.0, Inf]  # upper bound wave for each state
 
 # vesselOperability[v, s] = 1 if vessel v can operate in ALL conditions in state s
 vesselOperability = zeros(Int, nVessels, 3)
@@ -132,7 +143,7 @@ Returns:
     - `ObjValue`: (Float) Optimal objective value
     - `x_return`: (Array) Optimal schedule
 """
-function optimizer(w1) # crudely put the whole thing in a function for looping
+function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a function for looping
 
     ####################################
     ########## Declare model  ##########
@@ -142,14 +153,23 @@ function optimizer(w1) # crudely put the whole thing in a function for looping
     # Note: if complaining of infeasibility, try increasing time
 
     # Set the number of threads to use for running in Parallel (10 cores on Ryans Mac)
-    set_optimizer_attribute(m, "threads", 10)
+    set_optimizer_attribute(m, "threads", threads)
+
+    # Set the optimizer output verbosity
+    set_optimizer_attribute(m, "logLevel", logLevel)
 
     ####################################
     ######## Decision variables ########
     ####################################
 
     # x_i,k,v,t: A binary variable that equals 1 if task k at turbine i is being completed by vessel v during timestep t, and 0 otherwise.
-    @variable(m, x[1:nTurbines, 1:nTasks, 1:nVessels, 1:nTime], Bin)
+    @variable(m, x[1:nTurbines, 1:nTasks, 1:nVessels, 1:nTime], Bin) # TODO: maybe there is a way to reduce the size of X if Y has the other information
+
+    # t_end: timestep when the last task finishes
+    @variable(m, t_end >= 0)
+
+    # y_i,k,v: A binary variable that tracks if vessel v is assigned to task k at turbine i
+    @variable(m, y[1:nTurbines, 1:nTasks, 1:nVessels], Bin)
 
     ######################################
     ######## Objective Function ##########
@@ -160,29 +180,40 @@ function optimizer(w1) # crudely put the whole thing in a function for looping
     @assert (w1 <= 1 && w1 >= 0) || throw("ERROR: weight must be between 0 and 1")
 
     # Minimize total installation time using a time penalty and cost penalty approach
-    @objective(m, Min, w1 * sum(x[i,k,v,t]*t for i = 1:nTurbines, k = 1:nTasks, v = 1:nVessels, t = 1:nTime) + 
-                (1-w1) * sum(x[i,k,v,t]*taskCosts[v][k] for i = 1:nTurbines, k = 1:nTasks, v = 1:nVessels, t = 1:nTime))
-
+    @objective(m, Min, w1 * t_end + (1-w1) * sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime))
+    
     ######################################
     ############# Constraints ############
     ######################################
     # Some of these are inspired by Housner et al. (2026), a forthcoming paper
 
-    # Task Completion: sum of xi,k,t over all timesteps t must equal the required duration for task k. This also ensures each task is only completed once.
-    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels,], sum(x[i,k,v,t] for t = 1:nTime) == taskDurations[v][k])
+    # Task completion: The total duration spent on a task at a turbine across all vessels must be the duration of the task. This also ensures each task is only completed once.
+    @constraint(m, [i=1:nTurbines, k=1:nTasks], sum(x[i,k,v,t] for v=1:nVessels, t=1:nTime) == baseDurations[k])
+
+    # Only valid vessels: Incapable vessels do no work on tasks they cannot perform (necessary for the time objective, because cost is ingnored)
+    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels; taskCapable[v,k] == 0], sum(x[i,k,v,t] for t=1:nTime) == 0)
 
     # Continuous tasks: Once a task stops, it cannot start again. tt is the time steps after t.
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=2:nTime, tt=t+1:nTime], x[i,k,v,tt] <= x[i,k, v, t] - x[i,k,v,t-1] + 1)
 
-    # Dependency: Task k+1 cannot begin until task k is fully completed at turbine i. If task k+1 is active at t, then the sum of task k times to t-1 needs to be taskDurations.
-    @constraint(m, [i=1:nTurbines, k=1:nTasks-1, v=1:nVessels, t=1:nTime], x[i,k+1,v,t] * taskDurations[v][k] <= sum(x[i,k,v,tt] for tt=1:t-1))
+    # Consistent tasks: exactly one vessel is assigned to each (turbine, task) pair
+    @constraint(m, [i=1:nTurbines, k=1:nTasks], sum(y[i,k,v] for v=1:nVessels) == 1)
 
-    # Resource Limit: sum of active tasks (across all turbines) cannot exceed your available vessels (e.g., you only have 1 cable-laying vessel, so only one turbine can have Task 1 active per timestep).
+    # Vessel usage: A vessel can only do task k at turbine i if it is assigned to it
+    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels], sum(x[i,k,v,t] for t=1:nTime) <= baseDurations[k] * y[i,k,v])
+
+    # Dependency: Task k+1 cannot begin until task k is fully completed at turbine i. If task k+1 is active at t, then the sum of task k times to t-1 across all vessels needs to be baseDurations (i.e. any vessel doing task k needs to be finished).
+    @constraint(m, [i=1:nTurbines, k=1:nTasks-1, v=1:nVessels, t=1:nTime], x[i,k+1,v,t] * baseDurations[k] <= sum(x[i,k,vv,tt] for vv=1:nVessels, tt=1:t-1))
+
+    # Resource limit: sum of active tasks (across all turbines) cannot exceed your available vessels (e.g., you only have 1 cable-laying vessel, so only one turbine can have Task 1 active per timestep).
     @constraint(m, [t=1:nTime, v=1:nVessels], sum(x[i,k,v,t] for i = 1:nTurbines, k = 1:nTasks) <= 1)
 
     # Weather constraints: if weather conditions at time t prevent vessel v from operating, then x[i,k,v,t] must be 0 for all i and k. We can use the weather operability matrix we created above to enforce this.
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime], x[i,k,v,t] <= weather[v,t])
     
+    # Set ending time: t_end must be >= the last timestep any task is active. This sets t_end as the time the last task is completed.
+    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime], t_end >= t * x[i,k,v,t])
+
     ######################################
     ########### Print and solve ##########
     ######################################
@@ -195,18 +226,25 @@ function optimizer(w1) # crudely put the whole thing in a function for looping
     ObjValue = objective_value(m);
 
     x_return = value(x)
+    t_end_return = value(t_end)
 
-    return ObjValue, x_return
+    return ObjValue, x_return, t_end_return
 end
 
 # Run function for time optimization
-objective, x = optimizer(1)
+objective, x, t_end = optimizer(1)
 
 # Make a nice looking Gantt chart w/ f-strings
 taskNames = ["Mooring Install", "Platform Hook-up", "Cable Install", ] # strings must be <16 char
-println("--- Gantt Chart ---")
-header = "Turbine |       Task       | Vessel |" * join([f" {t:2d}" for t in Time], "")
+println(f"--- Gantt Chart (start time: {TimeStart}) ---")
+header = "Turbine |       Task       | Vessel |" * join([f" {t:2d}" for t in 1:nTime], "") # columns are the time steps from start
 println(header)
+println("-" ^ length(header))
+print("        |                  |        |")
+for t in 1:nTime
+    print(f"  {weatherSequence[t]:1d}")
+end
+print("\n")
 println("-" ^ length(header))
 
 for i in 1:nTurbines
@@ -214,15 +252,20 @@ for i in 1:nTurbines
         # Find which vessel is assigned to this (turbine, task) pair
         assigned_vessel = "-"
         for v in 1:nVessels
-            if sum(round(Int, x[i, k, v, t]) for t in 1:nTime) > 0 # round is needed because value(x) returns float
-                assigned_vessel = Vessels[v]
+            if sum(round(Int, x[i,k,v,t]) for t in 1:nTime) > 0 # round is needed because optimizer returns float
+                assigned_vessel = v
                 break
             end
         end
         print(f"   {i:2d}   | {taskNames[k]:16s} |   {assigned_vessel:1s}    |")
         for t in 1:nTime
-            val = sum(round(Int, x[i, k, v, t]) for v in 1:nVessels)
-            cell = val == 1 ? "  X" : "  ."
+            cell = if round(Int, x[i,k,assigned_vessel,t]) == 1
+                "  O"
+            elseif assigned_vessel != "-" && weather[assigned_vessel,t] == 0
+                "  X"
+            else
+                "  ."
+            end
             print(cell)
         end
         print("\n")
@@ -232,12 +275,13 @@ end
 
 # Solve for 10 weights, to get Pareto front
 nWeights = 10
+time_objectives = []
+cost_objectives = []
 for i in 1:nWeights
     println(f"Optimizing for weight index {i}")
-    local objective, x = optimizer(i / nWeights)
-    time_obj = sum(x[ii,k,v,t]*t for ii=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime)
+    local objective, x, t_end = optimizer(i / nWeights; logLevel=0)
     cost_obj = sum(x[ii,k,v,t]*taskCosts[v][k] for ii=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime)
-    push!(time_objectives, time_obj)
+    push!(time_objectives, t_end)
     push!(cost_objectives, cost_obj)
 end
 
