@@ -233,7 +233,7 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     # Set ending time: t_end must be >= the last timestep any task is active. This sets t_end as the time the last task is completed.
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime], t_end >= t * x[i,k,v,t])
 
-    # String completeness: z[s,t] = 1 if all turbines in string s are complete by time t: 
+    # String completeness: z[s,t] = 0 if all turbines in string s have not been completed: 
     #    Z * (time to complete all tasks in the string) <= (time taken before t for all tasks at the turbines in the string), and objective pushes z to 1 early
     @constraint(m, [s=1:nStrs, t=1:nTime], z[s,t] * sum(baseDurations) * length(Str[s]) <= sum(x[i,k,v,tt] for i in Str[s], k=1:nTasks, v=1:nVessels, tt=1:t))
     
@@ -245,7 +245,7 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     ######################################
 
     # print(m)
-    set_optimizer_attribute(m, "seconds", 120)
+    set_optimizer_attribute(m, "seconds", 120) # solver time limit
 
     optimize!(m)
 
