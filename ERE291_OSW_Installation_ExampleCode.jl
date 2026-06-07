@@ -6,7 +6,7 @@ Priority of work:
 - [X] 1. Set of weather conditions
 - [X] 2. More realistic task lengths and vessel costs
 - [X] 3. Cost function for install (right now are fixed because they are tied to tasks and all vessels are the same for the tasks)
-- [ ] 4. Sets of turbines in strings
+- [X] 4. Sets of turbines in strings
 - [ ] 5. Distance between turbines and port in the cost (this will make a more meaningful patero for the costs)
 - [ ] 6. Time permitting: emissions
 """
@@ -43,6 +43,12 @@ maxTurbines = 4 # start with 2x2 array of turbines
 Turbines = collect(1:maxTurbines)
 nTurbines = length(Turbines)
 
+# Set of strings, containing turbine indicies. 
+# RD: once a string is completed, it adds negative cost. This encourages the model to install the turbines in a string together.
+Str = [[1,3],[2,4]]
+nStrs = length(Str)
+@assert all(i in vcat(Str...) for i in Turbines) || throw("ERROR: all turbines must belong to a string")
+
 # Set of timesteps
 TimeStart = 200 # RD: 0-200 has a lot of infeasible seastates
 TimeEnd = 215
@@ -52,8 +58,6 @@ nTime = length(Time)
 # Set of weather conditions (12-hour timesteps, based on GEE analysis of Gulf of Maine data)
 weather_df = CSV.read("gulf_of_maine_weather_states_12hourly.csv", DataFrame)
 weatherSequence = weather_df.weather_state[TimeStart:TimeEnd]
-
-# TODO: Sets of turbines in strings
 
 # Set of tasks
 Tasks = [1, 2, 3] # 1: cable installation, 2: mooring installation, 3: platform hook-up 
@@ -83,6 +87,8 @@ nVessels = nrow(Vessels)
 # Integer representation of inifintely high value. Useful for big M method
 int_inf = typemax(Int)
 
+# TODO: locations of the turbines (in x and y) and the location of the port
+
 # KH NOTE: Updated task durations & task remove hardcoding & pull in CSV vessel data.
 
 # Task durations by vessel type: how many timesteps each task takes at each turbine (0 disables the vessel for that task)
@@ -104,6 +110,9 @@ taskCosts = [
      for k in 1:nTasks]
     for v in 1:nVessels
 ]
+
+# Revenue per turbine once online
+revenue = 25000 # [$/time step] # TODO: make this a more real number
 
 # Add in weather constraints for each vessel type
 maxWind  = Vessels.maxWind
@@ -127,10 +136,10 @@ end
 weather = [vesselOperability[v, weatherSequence[t]] for v in 1:nVessels, t in 1:nTime]
 
 # Check arrays and sizes
-@assert length(taskDurations) == nVessels "ERROR: taskDurations must have one entry per vessel"
-@assert length(taskCosts) == nVessels "ERROR: taskCosts must have one entry per vessel"
-@assert all(length(taskDurations[v]) == nTasks for v in 1:nVessels) "ERROR: each vessel must have one duration per task"
-@assert all(length(taskCosts[v]) == nTasks for v in 1:nVessels) "ERROR: each vessel must have one cost per task"
+@assert length(taskDurations) == nVessels || throw("ERROR: taskDurations must have one entry per vessel")
+@assert length(taskCosts) == nVessels || throw("ERROR: taskCosts must have one entry per vessel")
+@assert all(length(taskDurations[v]) == nTasks for v in 1:nVessels) || throw("ERROR: each vessel must have one duration per task")
+@assert all(length(taskCosts[v]) == nTasks for v in 1:nVessels) || throw("ERROR: each vessel must have one cost per task")
 
 """
     optimizer(w1)
@@ -171,6 +180,9 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     # y_i,k,v: A binary variable that tracks if vessel v is assigned to task k at turbine i
     @variable(m, y[1:nTurbines, 1:nTasks, 1:nVessels], Bin)
 
+    # z: A binary variable that tracks if a string is complete at time t
+    @variable(m, z[1:nStrs, 1:nTime], Bin)
+
     ######################################
     ######## Objective Function ##########
     ######################################
@@ -180,8 +192,15 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     @assert (w1 <= 1 && w1 >= 0) || throw("ERROR: weight must be between 0 and 1")
 
     # Minimize total installation time using a time penalty and cost penalty approach
-    @objective(m, Min, w1 * t_end + (1-w1) * sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime))
+    # where there is a cost benefit to completing strings earlier (from eqn 1a in Amorosi et al.)
+    @objective(m, Min, w1 * t_end + (1-w1) *
+        (sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime))
+         - sum(revenue * sum(z[s,t] * length(Str[s]) for t=1:nTime) for s=1:nStrs))
+
+    # TODO: add a positive cost for when a strings of turbines is completed (Amorosi et al.). Maybe use @NLexpression?
     
+    # TODO: transit distances as part of the time/costs
+
     ######################################
     ############# Constraints ############
     ######################################
@@ -190,8 +209,8 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     # Task completion: The total duration spent on a task at a turbine across all vessels must be the duration of the task. This also ensures each task is only completed once.
     @constraint(m, [i=1:nTurbines, k=1:nTasks], sum(x[i,k,v,t] for v=1:nVessels, t=1:nTime) == baseDurations[k])
 
-    # Only valid vessels: Incapable vessels do no work on tasks they cannot perform (necessary for the time objective, because cost is ingnored)
-    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels; taskCapable[v,k] == 0], sum(x[i,k,v,t] for t=1:nTime) == 0)
+    # Only valid vessels: Incapable vessels do no work on tasks they cannot perform (necessary for the time objective, because cost is ignored)
+    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels], sum(x[i,k,v,t] for t=1:nTime) <= taskCapable[v,k] * baseDurations[k])
 
     # Continuous tasks: Once a task stops, it cannot start again. tt is the time steps after t.
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=2:nTime, tt=t+1:nTime], x[i,k,v,tt] <= x[i,k, v, t] - x[i,k,v,t-1] + 1)
@@ -213,6 +232,13 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     
     # Set ending time: t_end must be >= the last timestep any task is active. This sets t_end as the time the last task is completed.
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime], t_end >= t * x[i,k,v,t])
+
+    # String completeness: z[s,t] = 1 if all turbines in string s are complete by time t: 
+    #    Z * (time to complete all tasks in the string) <= (time taken before t for all tasks at the turbines in the string), and objective pushes z to 1 early
+    @constraint(m, [s=1:nStrs, t=1:nTime], z[s,t] * sum(baseDurations) * length(Str[s]) <= sum(x[i,k,v,tt] for i in Str[s], k=1:nTasks, v=1:nVessels, tt=1:t))
+    
+    # String completeness: Once a string is complete, it stays complete
+    @constraint(m, [s=1:nStrs, t=2:nTime], z[s,t] >= z[s,t-1])
 
     ######################################
     ########### Print and solve ##########
@@ -242,7 +268,7 @@ println(header)
 println("-" ^ length(header))
 print("        |                  |        |")
 for t in 1:nTime
-    print(f"  {weatherSequence[t]:1d}")
+    print(f"  {weatherSequence[t]:1d}") # 2nd row of table is weather conditions
 end
 print("\n")
 println("-" ^ length(header))
@@ -272,6 +298,12 @@ for i in 1:nTurbines
     end
     println("-" ^ length(header))
 end
+println("Legend:")
+println("X - Task is inactive due to weather")
+println("O - Task is active")
+println(". - Task could be active but is not")
+println("-----------------------------------")
+
 
 # Solve for 10 weights, to get Pareto front
 nWeights = 10
