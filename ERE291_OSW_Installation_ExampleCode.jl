@@ -16,6 +16,7 @@ Priority of work:
 ####################################
 using CSV
 using DataFrames
+using LinearAlgebra
 using JuMP
 using Cbc
 using PyFormattedStrings # to get python style f-string formatting
@@ -51,7 +52,7 @@ nStrs = length(Str)
 
 # Set of timesteps
 TimeStart = 200 # RD: 0-200 has a lot of infeasible seastates
-TimeEnd = 215
+TimeEnd = 225
 Time = collect(TimeStart:TimeEnd)
 nTime = length(Time)
 
@@ -60,7 +61,7 @@ weather_df = CSV.read("gulf_of_maine_weather_states_12hourly.csv", DataFrame)
 weatherSequence = weather_df.weather_state[TimeStart:TimeEnd]
 
 # Set of tasks
-Tasks = [1, 2, 3] # 1: cable installation, 2: mooring installation, 3: platform hook-up 
+Tasks = ["moorInstall", "platformTow", "platformHookup", "cableInstall"] # names to match vessel csv columns
 # TODO: error check to make sure data columns match tasks. Cable install should happen first.
 nTasks = length(Tasks)
 
@@ -87,18 +88,59 @@ nVessels = nrow(Vessels)
 # Integer representation of inifintely high value. Useful for big M method
 int_inf = typemax(Int)
 
-# TODO: locations of the turbines (in x and y) and the location of the port
+# Turbine locations [m]
+TurbLoc = [[-500,500], [-500,1000], [500,500], [500,1000]] # assume turbines are 1 km apart in a grid
+@assert length(TurbLoc) == nTurbines || throw("ERROR: Mismatch in nTurbines and num Turbine Locations")
+
+# Port location [m]
+PortLoc = [0,0]
+
+# Turbine distance to port [m] - shape: (nTurbines)
+PortDist = [norm(TurbLoc[i] .- PortLoc, 2) for i=1:nTurbines] # L2 norm
+
+# Time to port by vessel [12hr periods] - shape: nVessels array of (nTurbines, nTurbines) objects to match TurbTime, nonzero only on diagonal
+PortTime = [diagm(ceil.(Int, PortDist / Vessels.transitSpeed[v] / 3600 / 12)) for v=1:nVessels] # Units: m * (m/s)^-1 * 1hr / 3600s * 1 time period / 12hr
+for v in eachindex(PortTime)
+    PortTime[v] .= 0
+end
+
+# Turbine distance to eachother [m] - shape: (nTurbines, nTurbines)
+TurbDist = [norm(TurbLoc[i] .- TurbLoc[j]) for i in 1:nTurbines, j in 1:nTurbines]
+
+# Turbine time to eachother [12 hr periods] - shape: nVessels array of (nTurbines, nTurbines) objects
+TurbTime = [[ceil(Int, TurbDist[i,j] ./ Vessels.transitSpeed[v] / 3600 / 12) for i=1:nTurbines, j=1:nTurbines] for v=1:nVessels]
+for v in eachindex(PortTime)
+    TurbTime[v] .= 0
+end
+
 
 # KH NOTE: Updated task durations & task remove hardcoding & pull in CSV vessel data.
 
-# Task durations by vessel type: how many timesteps each task takes at each turbine (0 disables the vessel for that task)
+# Baseline task duration (at the turbine)
 # TODO: make these realistic for the difference vessel types based on table 5.9
-baseDurations = [2, 2, 1]  # [moorInstall, platformHookup, cableInstall]
+baseDurations = [2, 2, 1, 1]  # [moorInstall, platformTow, platformHookup, cableInstall]. FIXME: set platformTow = 2 for now, but should be 0 when/if distances are completed
 
-# taskDurations[v][k] = duration for vessel v doing task k
-# If vessel can't do the task (taskCapable == 0), duration is 0
-taskCapable = Matrix(Vessels[:, [:moorInstall, :platformHookup, :cableInstall]])
-taskDurations = [taskCapable[v, :] .* baseDurations for v in 1:nVessels]
+# taskDurations[k] = duration for task k to be completed, including transit times
+taskDurations = [] # Shape: nTasks array of nVessels arrays of (nTurbines, nTurbines) objects
+for (k, task) in enumerate(Tasks)
+    # Two types of tasks: 
+    # 1) go to and from port every time
+    # 2) stay at sea for the whole project
+    if task == "moorInstall"
+        push!(taskDurations, [baseDurations[k] .+ 2 .* PortTime[v] for v in 1:nVessels])
+    elseif task == "platformTow"
+        push!(taskDurations, [baseDurations[k] .+ 2 .* PortTime[v] for v in 1:nVessels])
+    elseif task == "platformHookup"
+        push!(taskDurations, [baseDurations[k] .+ TurbTime[v] for v in 1:nVessels])
+    elseif task == "cableInstall"
+        push!(taskDurations, [baseDurations[k] .+ 2 .* PortTime[v] for v in 1:nVessels])
+    else
+        throw("ERROR: Invalid task")
+    end
+end
+
+# Matrix of capable vessels for tasks: If vessel can't do the task, taskCapable == 0
+taskCapable = Matrix(Vessels[:, [:moorInstall, :platformTow, :platformHookup, :cableInstall]])
 
 # Task costs: how much does it cost to do each task
 # taskCosts[v][k] = cost for vessel v doing task k per timestep
@@ -136,9 +178,7 @@ end
 weather = [vesselOperability[v, weatherSequence[t]] for v in 1:nVessels, t in 1:nTime]
 
 # Check arrays and sizes
-@assert length(taskDurations) == nVessels || throw("ERROR: taskDurations must have one entry per vessel")
 @assert length(taskCosts) == nVessels || throw("ERROR: taskCosts must have one entry per vessel")
-@assert all(length(taskDurations[v]) == nTasks for v in 1:nVessels) || throw("ERROR: each vessel must have one duration per task")
 @assert all(length(taskCosts[v]) == nTasks for v in 1:nVessels) || throw("ERROR: each vessel must have one cost per task")
 
 """
@@ -175,7 +215,7 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     @variable(m, x[1:nTurbines, 1:nTasks, 1:nVessels, 1:nTime], Bin) # TODO: maybe there is a way to reduce the size of X if Y has the other information
 
     # t_end: timestep when the last task finishes
-    @variable(m, t_end >= 0)
+    @variable(m, t_end >= 0, Int)
 
     # y_i,k,v: A binary variable that tracks if vessel v is assigned to task k at turbine i
     @variable(m, y[1:nTurbines, 1:nTasks, 1:nVessels], Bin)
@@ -197,14 +237,24 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
         (sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime))
          - sum(revenue * sum(z[s,t] * length(Str[s]) for t=1:nTime) for s=1:nStrs))
 
-    # TODO: add a positive cost for when a strings of turbines is completed (Amorosi et al.). Maybe use @NLexpression?
-    
-    # TODO: transit distances as part of the time/costs
-
     ######################################
     ############# Constraints ############
     ######################################
     # Some of these are inspired by Housner et al. (2026), a forthcoming paper
+
+    # Shapes and types:
+    # - x:             (nTurbines, nTasks, nVessels, nTime), binary
+    # - y:             (nTurbines, nTasks, nVessels), binary
+    # - z:             (nStrs, nTime), binary
+    # - t_end:         scalar, Int
+    # - baseDurations: nTasks array, Int
+    # - taskDurations: nTasks array of nVessels arrays of (nTurbines, nTurbines) objects, Int
+    # - taskCosts:     nVessels array of nTasks arrays of (scalar per vessel/task) objects, Int
+    # - weather:       (nVessels, nTime), binary
+
+    # TODO: this is complaining of infeasibility when using taskDurations[k][v][i,i], which should return just the base durations. 
+    # Need some form of tracking that says which turbine was visited last, for the (i,i) indexing. Need to figure out why it is 
+    # saying infeasible.
 
     # Task completion: The total duration spent on a task at a turbine across all vessels must be the duration of the task. This also ensures each task is only completed once.
     @constraint(m, [i=1:nTurbines, k=1:nTasks], sum(x[i,k,v,t] for v=1:nVessels, t=1:nTime) == baseDurations[k])
@@ -261,7 +311,6 @@ end
 objective, x, t_end = optimizer(1)
 
 # Make a nice looking Gantt chart w/ f-strings
-taskNames = ["Mooring Install", "Platform Hook-up", "Cable Install", ] # strings must be <16 char
 println(f"--- Gantt Chart (start time: {TimeStart}) ---")
 header = "Turbine |       Task       | Vessel |" * join([f" {t:2d}" for t in 1:nTime], "") # columns are the time steps from start
 println(header)
@@ -283,7 +332,7 @@ for i in 1:nTurbines
                 break
             end
         end
-        print(f"   {i:2d}   | {taskNames[k]:16s} |   {assigned_vessel:1s}    |")
+        print(f"   {i:2d}   | {Tasks[k]:16s} |   {assigned_vessel:1s}    |")
         for t in 1:nTime
             cell = if round(Int, x[i,k,assigned_vessel,t]) == 1
                 "  O"
@@ -304,6 +353,9 @@ println("O - Task is active")
 println(". - Task could be active but is not")
 println("-----------------------------------")
 
+# TODO: save Gantt chart to txt file, useful for when looking at Pareto fronts
+
+# TODO: plot of cost over time
 
 # Solve for 10 weights, to get Pareto front
 nWeights = 10
