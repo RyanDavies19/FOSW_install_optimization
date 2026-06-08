@@ -1,27 +1,27 @@
---- Gantt Chart (start time: 200, w1=0.5, w3=0.5) ---
+--- Gantt Chart (start time: 200, w1=0.33, w3=0.34) ---
 Turbine |       Task       | Vessel |  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26
 -------------------------------------------------------------------------------------------------------------------
         |                  |        |  1  1  1  1  1  2  2  1  1  1  1  2  3  3  2  2  2  1  1  1  1  1  1  1  1  1
 -------------------------------------------------------------------------------------------------------------------
-    1   |      moorInstall |   1    |  .  .  O  O  .  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
-    1   |      platformTow |   3    |  .  .  .  .  .  X  X  O  O  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
-    1   |   platformHookup |   3    |  .  .  .  .  .  X  X  .  .  O  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
-    1   |     cableInstall |   5    |  .  .  .  .  .  X  X  .  .  .  O  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    1   |      moorInstall |   1    |  O  O  .  .  .  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    1   |      platformTow |   4    |  .  .  O  O  .  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    1   |   platformHookup |   4    |  .  .  .  .  O  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    1   |     cableInstall |   6    |  .  .  .  .  .  X  X  O  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
 -------------------------------------------------------------------------------------------------------------------
-    2   |      moorInstall |   2    |  .  .  O  O  .  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    2   |      moorInstall |   2    |  .  .  .  O  O  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
     2   |      platformTow |   4    |  .  .  .  .  .  X  X  O  O  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
-    2   |   platformHookup |   4    |  .  .  .  .  .  X  X  .  .  O  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    2   |   platformHookup |   3    |  .  .  .  .  .  X  X  .  .  O  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
     2   |     cableInstall |   6    |  .  .  .  .  .  X  X  .  .  .  O  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
 -------------------------------------------------------------------------------------------------------------------
-    3   |      moorInstall |   1    |  O  O  .  .  .  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
-    3   |      platformTow |   4    |  .  .  O  O  .  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
-    3   |   platformHookup |   4    |  .  .  .  .  O  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
-    3   |     cableInstall |   6    |  .  .  .  .  .  X  X  .  .  O  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    3   |      moorInstall |   2    |  O  O  .  .  .  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    3   |      platformTow |   3    |  .  .  O  O  .  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    3   |   platformHookup |   3    |  .  .  .  .  O  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    3   |     cableInstall |   5    |  .  .  .  .  .  X  X  O  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
 -------------------------------------------------------------------------------------------------------------------
-    4   |      moorInstall |   2    |  O  O  .  .  .  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
-    4   |      platformTow |   3    |  .  .  O  O  .  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
-    4   |   platformHookup |   3    |  .  .  .  .  O  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
-    4   |     cableInstall |   6    |  .  .  .  .  .  X  X  .  O  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    4   |      moorInstall |   1    |  .  .  .  O  O  X  X  .  .  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    4   |      platformTow |   3    |  .  .  .  .  .  X  X  O  O  .  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    4   |   platformHookup |   4    |  .  .  .  .  .  X  X  .  .  O  .  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
+    4   |     cableInstall |   5    |  .  .  .  .  .  X  X  .  .  .  O  X  X  X  X  X  X  .  .  .  .  .  .  .  .  .
 -------------------------------------------------------------------------------------------------------------------
 Legend:
 X - Task is inactive due to weather

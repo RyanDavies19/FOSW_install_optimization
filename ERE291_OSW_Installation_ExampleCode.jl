@@ -145,7 +145,7 @@ taskCosts = [
 ]
 
 # Revenue per turbine once online
-revenue = 25000 # [$/time step] # TODO: make this a more real number
+revenue = 2314.47 # [$/time step] # TODO: make this a more real number
 
 # Add in weather constraints for each vessel type
 maxWind  = Vessels.maxWind
@@ -170,7 +170,7 @@ weather = [vesselOperability[v, weatherSequence[t]] for v in 1:nVessels, t in 1:
 
 # Calculate emissions per vessel per timestep
 ef_co2 = 679.47     # g/kWh, constant across tiers
-V_working = 1.5     # knots, assumed on-site speed
+V_working = 1.5     # knots, assumed on-site speed TODO make this more
 lf_floor = 0.02     # 2% minimum 
 timestep_hr = 12    # 12-hour timesteps
 
@@ -342,55 +342,18 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
     return ObjValue, x_return, z_return, t_end_return, emissions_return
 end
 
-# Run function for time optimization
-objective, x, z, t_end, emissions = optimizer(1, 0)      # pure time
-objective, x, z, t_end, emissions = optimizer(0, 1)      # pure emissions
-w1 = 0.5
-w3 = 0.5
-objective, x, z, t_end, emissions = optimizer(w1, w3)    # equal weight
+# Run function for time optimization — store each scenario's results
+obj_time,  x_time,  z_time,  t_end_time,  em_time  = optimizer(1.0, 0.0)   # pure time
+obj_emit,  x_emit,  z_emit,  t_end_emit,  em_emit  = optimizer(0.0, 1.0)   # pure emissions
+w1 = 0.33
+w3 = 0.34
+obj_equal, x_equal, z_equal, t_end_equal, em_equal = optimizer(w1,  w3)    # equal weight
 
-# Make a nice looking Gantt chart w/ f-strings
-println(f"--- Gantt Chart (start time: {TimeStart}) ---")
-header = "Turbine |       Task       | Vessel |" * join([f" {t:2d}" for t in 1:nTime], "") # columns are the time steps from start
-println(header)
-println("-" ^ length(header))
-print("        |                  |        |")
-for t in 1:nTime
-    print(f"  {weatherSequence[t]:1d}") # 2nd row of table is weather conditions (1, 2, or 3) per time step 
-end
-print("\n")
-println("-" ^ length(header))
+# Use equal-weight results for the Gantt chart below
+objective, x, z, t_end, emissions = obj_equal, x_equal, z_equal, t_end_equal, em_equal
 
-for i in 1:nTurbines
-    for k in 1:nTasks
-        # Find which vessel is assigned to this (turbine, task) pair
-        assigned_vessel = "-"
-        for v in 1:nVessels
-            if sum(round(Int, x[i,k,v,t]) for t in 1:nTime) > 0 # round is needed because optimizer returns float, > 0 because some tasks take longer than 1 time block
-                assigned_vessel = v
-                break
-            end
-        end
-        print(f"   {i:2d}   | {Tasks[k]:16s} |   {assigned_vessel:1d}    |")
-        for t in 1:nTime # at each time step:
-            if round(Int, x[i,k,assigned_vessel,t]) == 1
-                cell = "  O" # assigned_vessel is completing task k at turbine i
-            elseif assigned_vessel != "-" && weather[assigned_vessel,t] == 0
-                cell = "  X" # assigned_vessel cannot be active because of weather
-            else
-                cell = "  ." # assigned_vessel could be active but is not
-            end
-            print(cell)
-        end
-        print("\n")
-    end
-    println("-" ^ length(header))
-end
-println("Legend:")
-println("X - Task is inactive due to weather")
-println("O - Task is active")
-println(". - Task could be active but is not")
-println("-----------------------------------")
+# Build header string (used by Gantt chart file below)
+header = "Turbine |       Task       | Vessel |" * join([f" {t:2d}" for t in 1:nTime], "")
 
 # Save Gantt chart to txt file
 open("gantt_chart.txt", "w") do io
@@ -502,16 +465,22 @@ for w3 in w3_values
     end
 end
 
-# Plot a Pareto front of cost vs duration
-scatter(time_objectives, cost_objectives,
-    xlabel = "Time Objective",
-    ylabel = "Cost Objective (\$)",
+# Plot 2D Pareto front — one series per w3 value
+pareto_colors = [:blue, :orange, :red]
+p2d = plot(
+    xlabel = "Installation Duration (timesteps)",
+    ylabel = "Net Cost (\$)",
     title  = "Pareto Front: Installation Time vs. Cost",
-    legend = false,
-    marker = :circle,
-    dpi = 300
+    dpi    = 300
 )
-savefig("pareto.png")
+for (i, wv) in enumerate(w3_values)
+    idx = findall(w3_labels .== wv)
+    scatter!(p2d, time_objectives[idx], cost_objectives[idx],
+             label  = "w3 = $(wv)",
+             color  = pareto_colors[i],
+             marker = :circle)
+end
+savefig(p2d, "pareto.png")
 
 scatter(time_objectives, cost_objectives, emissions_objectives,
         xlabel="Time", ylabel="Cost (\$)", zlabel="CO2 (kg)",
@@ -521,3 +490,54 @@ scatter(time_objectives, cost_objectives, emissions_objectives,
         dpi=300)
 
 savefig("pareto_3d.png")
+
+
+####################################
+########## Results Summary #########
+####################################
+
+scenarios = [
+    ("Pure Time",      x_time,  z_time,  t_end_time,  em_time),
+    ("Pure Emissions", x_emit,  z_emit,  t_end_emit,  em_emit),
+    ("Equal Weight",   x_equal, z_equal, t_end_equal, em_equal),
+]
+
+println("\n" * "=" ^ 75)
+println("RESULTS SUMMARY")
+println("=" ^ 75)
+println("Scenario           | Duration  |   Vessel Cost |       Revenue |      Net Cost |   CO2 (kg)")
+println("-" ^ 75)
+
+for (name, sx, sz, st_end, semissions) in scenarios
+    total_vessel_cost = sum(
+        round(Int, sx[i,k,v,t]) * taskCosts[v][k]
+        for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime
+        if taskCosts[v][k] < int_inf
+    )
+
+    total_revenue = sum(
+        round(Int, sz[s,t]) * revenue * length(Str[s])
+        for s=1:nStrs, t=1:nTime
+    )
+
+    net_cost      = total_vessel_cost - total_revenue
+    duration_days = st_end * 0.5  # 12-hr timesteps → days
+
+    println(
+        rpad(name, 18) * " | " *
+        lpad(f"{duration_days:.1f}", 6) * " d | \$" *
+        lpad(f"{total_vessel_cost:.0f}", 13) * " | \$" *
+        lpad(f"{total_revenue:.0f}", 12) * " | \$" *
+        lpad(f"{net_cost:.0f}", 12) * " | " *
+        lpad(f"{semissions:.1f}", 10)
+    )
+
+    for s in 1:nStrs
+        t_complete = findfirst(t -> round(Int, sz[s,t]) == 1, 1:nTime)
+        if !isnothing(t_complete)
+            println(f"  → String {s} online: timestep {t_complete + TimeStart - 1} (day {t_complete * 0.5:.1f})")
+        end
+    end
+end
+
+println("=" ^ 75)
