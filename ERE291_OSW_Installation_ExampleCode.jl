@@ -1,7 +1,12 @@
-# Optimal Scheduling of Offshore Wind Installation: A Multi-Objective Approach
-# Updated May 21, 2026
-
 """
+Optimal Scheduling of Offshore Wind Installation: A Multi-Objective Approach
+Updated June 8th, 2026
+
+References:
+- Mykel J. Kochenderfer and Tim Allan Wheeler. Algorithms for Optimization. The MIT press, Cambridge, 2019. ISBN 978-0-262-03942-0.
+- Forthcoming: S. Housner, R. Davies, M. Hall, Y. R. Alkarem, F. Moreno, and E. Baca, “AN OPEN-SOURCE SCHEDULING OPTIMIZATION TOOL FOR MARINE OPERATIONS,” in Proceedings of the ASME 2026 45th International Conference on Ocean, Offshore and Arctic Engineering, Tokyo, Japan, June 7-12.
+- L. Amorosi, M. Fischetti, R. Paradiso, and R. Roberti, “Optimization models for the installation planning of offshore wind farms,” European Journal of Operational Research, vol. 315, no. 3, pp. 1182–1196, Jun. 2024, doi: 10.1016/j.ejor.2024.01.011.
+
 Priority of work:
 - [X] 1. Set of weather conditions
 - [X] 2. More realistic task lengths and vessel costs
@@ -9,6 +14,8 @@ Priority of work:
 - [X] 4. Sets of turbines in strings
 - [ ] 5. Distance between turbines and port in the cost (this will make a more meaningful patero for the costs)
 - [ ] 6. Time permitting: emissions
+
+@author: ryandavies19, kelsey-hartfelder
 """
 
 ####################################
@@ -22,19 +29,6 @@ using Cbc
 using PyFormattedStrings # to get python style f-string formatting
 using Plots
 
-"""
-    optimizer(w1, w2)
-
-Arguments:
-    - `w1`: (Float) Time objective weight. 
-    Must be 0 < w < 1. w2 = 1 - w1
-
-Returns:
-    - `ObjValue`: (Float) Optimal objective value
-    - `x_return`: (Array) Optimal schedule
-    - `Time`: (Array) The planning horizon
-"""
-
 ###############################
 ######### Define Sets #########
 ###############################
@@ -44,14 +38,13 @@ maxTurbines = 4 # start with 2x2 array of turbines
 Turbines = collect(1:maxTurbines)
 nTurbines = length(Turbines)
 
-# Set of strings, containing turbine indicies. 
-# RD: once a string is completed, it adds negative cost. This encourages the model to install the turbines in a string together.
+# Set of turbine strings, containing turbine indicies. 
 Str = [[1,3],[2,4]]
 nStrs = length(Str)
 @assert all(i in vcat(Str...) for i in Turbines) || throw("ERROR: all turbines must belong to a string")
 
-# Set of timesteps
-TimeStart = 200 # RD: 0-200 has a lot of infeasible seastates
+# Set of timesteps.
+TimeStart = 200 # RD: 0-200 has a lot of infeasible sea states
 TimeEnd = 225
 Time = collect(TimeStart:TimeEnd)
 nTime = length(Time)
@@ -62,7 +55,6 @@ weatherSequence = weather_df.weather_state[TimeStart:TimeEnd]
 
 # Set of tasks
 Tasks = ["moorInstall", "platformTow", "platformHookup", "cableInstall"] # names to match vessel csv columns
-# TODO: error check to make sure data columns match tasks. Cable install should happen first.
 nTasks = length(Tasks)
 
 # Set of vessel types
@@ -79,7 +71,7 @@ end
 Vessels = VesselTypes[rows, :]
 nVessels = nrow(Vessels)
 
-# TODO: Add backup vessels that can handle worse conditions but are more expensive
+# TODO: Add backup vessels that can handle worse conditions but are more expensive. This could give a pareto of time vs cost
 
 ###################################################
 ############ Define Parameters and Data ###########
@@ -88,56 +80,53 @@ nVessels = nrow(Vessels)
 # Integer representation of inifintely high value. Useful for big M method
 int_inf = typemax(Int)
 
-# Turbine locations [m]
-TurbLoc = [[-500,500], [-500,1000], [500,500], [500,1000]] # assume turbines are 1 km apart in a grid
-@assert length(TurbLoc) == nTurbines || throw("ERROR: Mismatch in nTurbines and num Turbine Locations")
+# # Turbine locations [m]
+# TurbLoc = [[-500,500], [-500,1000], [500,500], [500,1000]] # assume turbines are 1 km apart in a grid
+# @assert length(TurbLoc) == nTurbines || throw("ERROR: Mismatch in nTurbines and num Turbine Locations")
 
-# Port location [m]
-PortLoc = [0,0]
+# # Port location [m]
+# PortLoc = [0,0]
 
-# Turbine distance to port [m] - shape: (nTurbines)
-PortDist = [norm(TurbLoc[i] .- PortLoc, 2) for i=1:nTurbines] # L2 norm
+# # Turbine distance to port [m] - shape: (nTurbines)
+# PortDist = [norm(TurbLoc[i] .- PortLoc, 2) for i=1:nTurbines] # L2 norm
 
-# Time to port by vessel [12hr periods] - shape: nVessels array of (nTurbines, nTurbines) objects to match TurbTime, nonzero only on diagonal
-PortTime = [diagm(ceil.(Int, PortDist / Vessels.transitSpeed[v] / 3600 / 12)) for v=1:nVessels] # Units: m * (m/s)^-1 * 1hr / 3600s * 1 time period / 12hr
-for v in eachindex(PortTime)
-    PortTime[v] .= 0
-end
+# # Time to port by vessel [12hr periods] - shape: nVessels array of (nTurbines, nTurbines) objects to match TurbTime, nonzero only on diagonal
+# PortTime = [diagm(ceil.(Int, PortDist / Vessels.transitSpeed[v] / 3600 / 12)) for v=1:nVessels] # Units: m * (m/s)^-1 * 1hr / 3600s * 1 time period / 12hr
+# for v in eachindex(PortTime)
+#     PortTime[v] .= 0
+# end
 
-# Turbine distance to eachother [m] - shape: (nTurbines, nTurbines)
-TurbDist = [norm(TurbLoc[i] .- TurbLoc[j]) for i in 1:nTurbines, j in 1:nTurbines]
+# # Turbine distance to eachother [m] - shape: (nTurbines, nTurbines)
+# TurbDist = [norm(TurbLoc[i] .- TurbLoc[j]) for i in 1:nTurbines, j in 1:nTurbines]
 
-# Turbine time to eachother [12 hr periods] - shape: nVessels array of (nTurbines, nTurbines) objects
-TurbTime = [[ceil(Int, TurbDist[i,j] ./ Vessels.transitSpeed[v] / 3600 / 12) for i=1:nTurbines, j=1:nTurbines] for v=1:nVessels]
-for v in eachindex(PortTime)
-    TurbTime[v] .= 0
-end
-
-
-# KH NOTE: Updated task durations & task remove hardcoding & pull in CSV vessel data.
+# # Turbine time to eachother [12 hr periods] - shape: nVessels array of (nTurbines, nTurbines) objects
+# TurbTime = [[ceil(Int, TurbDist[i,j] ./ Vessels.transitSpeed[v] / 3600 / 12) for i=1:nTurbines, j=1:nTurbines] for v=1:nVessels]
+# for v in eachindex(PortTime)
+#     TurbTime[v] .= 0
+# end
 
 # Baseline task duration (at the turbine)
 # TODO: make these realistic for the difference vessel types based on table 5.9
 baseDurations = [2, 2, 1, 1]  # [moorInstall, platformTow, platformHookup, cableInstall]. FIXME: set platformTow = 2 for now, but should be 0 when/if distances are completed
 
-# taskDurations[k] = duration for task k to be completed, including transit times
-taskDurations = [] # Shape: nTasks array of nVessels arrays of (nTurbines, nTurbines) objects
-for (k, task) in enumerate(Tasks)
-    # Two types of tasks: 
-    # 1) go to and from port every time
-    # 2) stay at sea for the whole project
-    if task == "moorInstall"
-        push!(taskDurations, [baseDurations[k] .+ 2 .* PortTime[v] for v in 1:nVessels])
-    elseif task == "platformTow"
-        push!(taskDurations, [baseDurations[k] .+ 2 .* PortTime[v] for v in 1:nVessels])
-    elseif task == "platformHookup"
-        push!(taskDurations, [baseDurations[k] .+ TurbTime[v] for v in 1:nVessels])
-    elseif task == "cableInstall"
-        push!(taskDurations, [baseDurations[k] .+ 2 .* PortTime[v] for v in 1:nVessels])
-    else
-        throw("ERROR: Invalid task")
-    end
-end
+# # taskDurations[k] = duration for task k to be completed, including transit times
+# taskDurations = [] # Shape: nTasks array of nVessels arrays of (nTurbines, nTurbines) objects
+# for (k, task) in enumerate(Tasks)
+#     # Two types of tasks: 
+#     # 1) go to and from port every time
+#     # 2) stay at sea for the whole project
+#     if task == "moorInstall"
+#         push!(taskDurations, [baseDurations[k] .+ 2 .* PortTime[v] for v in 1:nVessels])
+#     elseif task == "platformTow"
+#         push!(taskDurations, [baseDurations[k] .+ 2 .* PortTime[v] for v in 1:nVessels])
+#     elseif task == "platformHookup"
+#         push!(taskDurations, [baseDurations[k] .+ TurbTime[v] for v in 1:nVessels])
+#     elseif task == "cableInstall"
+#         push!(taskDurations, [baseDurations[k] .+ 2 .* PortTime[v] for v in 1:nVessels])
+#     else
+#         throw("ERROR: Invalid task")
+#     end
+# end
 
 # Matrix of capable vessels for tasks: If vessel can't do the task, taskCapable == 0
 taskCapable = Matrix(Vessels[:, [:moorInstall, :platformTow, :platformHookup, :cableInstall]])
@@ -177,7 +166,7 @@ end
 # Create a weather operability matrix for each vessel and time step, based on the weather sequence and vessel operability by state
 weather = [vesselOperability[v, weatherSequence[t]] for v in 1:nVessels, t in 1:nTime]
 
-# Check arrays and sizes
+# Check arrays and sizes (TODO expand me)
 @assert length(taskCosts) == nVessels || throw("ERROR: taskCosts must have one entry per vessel")
 @assert all(length(taskCosts[v]) == nTasks for v in 1:nVessels) || throw("ERROR: each vessel must have one cost per task")
 
@@ -199,9 +188,9 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     ####################################
 
     m = Model(Cbc.Optimizer) 
-    # Note: if complaining of infeasibility, try increasing time
+    # Note: if complaining of infeasibility, try increasing time window
 
-    # Set the number of threads to use for running in Parallel (10 cores on Ryans Mac)
+    # Set the number of threads to use for running in parallel
     set_optimizer_attribute(m, "threads", threads)
 
     # Set the optimizer output verbosity
@@ -280,11 +269,11 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     # Weather constraints: if weather conditions at time t prevent vessel v from operating, then x[i,k,v,t] must be 0 for all i and k. We can use the weather operability matrix we created above to enforce this.
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime], x[i,k,v,t] <= weather[v,t])
     
-    # Set ending time: t_end must be >= the last timestep any task is active. This sets t_end as the time the last task is completed.
+    # Set ending time: t_end must be >= the last time step any task is active. This sets t_end as the time the last task is completed.
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime], t_end >= t * x[i,k,v,t])
 
     # String completeness: z[s,t] = 0 if all turbines in string s have not been completed: 
-    #    Z * (time to complete all tasks in the string) <= (time taken before t for all tasks at the turbines in the string), and objective pushes z to 1 early
+    #    Z * (theoretical time to complete all tasks in the string) <= (actual time taken before t for all tasks at the turbines in the string), and objective pushes z to 1 early
     @constraint(m, [s=1:nStrs, t=1:nTime], z[s,t] * sum(baseDurations) * length(Str[s]) <= sum(x[i,k,v,tt] for i in Str[s], k=1:nTasks, v=1:nVessels, tt=1:t))
     
     # String completeness: Once a string is complete, it stays complete
@@ -302,13 +291,14 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     ObjValue = objective_value(m);
 
     x_return = value(x)
+    z_return = value(z)
     t_end_return = value(t_end)
 
-    return ObjValue, x_return, t_end_return
+    return ObjValue, x_return, z_return, t_end_return
 end
 
 # Run function for time optimization
-objective, x, t_end = optimizer(1)
+objective, x, z, t_end = optimizer(1)
 
 # Make a nice looking Gantt chart w/ f-strings
 println(f"--- Gantt Chart (start time: {TimeStart}) ---")
@@ -317,7 +307,7 @@ println(header)
 println("-" ^ length(header))
 print("        |                  |        |")
 for t in 1:nTime
-    print(f"  {weatherSequence[t]:1d}") # 2nd row of table is weather conditions
+    print(f"  {weatherSequence[t]:1d}") # 2nd row of table is weather conditions (1, 2, or 3) per time step 
 end
 print("\n")
 println("-" ^ length(header))
@@ -327,19 +317,19 @@ for i in 1:nTurbines
         # Find which vessel is assigned to this (turbine, task) pair
         assigned_vessel = "-"
         for v in 1:nVessels
-            if sum(round(Int, x[i,k,v,t]) for t in 1:nTime) > 0 # round is needed because optimizer returns float
+            if sum(round(Int, x[i,k,v,t]) for t in 1:nTime) > 0 # round is needed because optimizer returns float, > 0 because some tasks take longer than 1 time block
                 assigned_vessel = v
                 break
             end
         end
-        print(f"   {i:2d}   | {Tasks[k]:16s} |   {assigned_vessel:1s}    |")
-        for t in 1:nTime
-            cell = if round(Int, x[i,k,assigned_vessel,t]) == 1
-                "  O"
+        print(f"   {i:2d}   | {Tasks[k]:16s} |   {assigned_vessel:1d}    |")
+        for t in 1:nTime # at each time step:
+            if round(Int, x[i,k,assigned_vessel,t]) == 1
+                cell = "  O" # assigned_vessel is completing task k at turbine i
             elseif assigned_vessel != "-" && weather[assigned_vessel,t] == 0
-                "  X"
+                cell = "  X" # assigned_vessel cannot be active because of weather
             else
-                "  ."
+                cell = "  ." # assigned_vessel could be active but is not
             end
             print(cell)
         end
@@ -363,9 +353,10 @@ time_objectives = []
 cost_objectives = []
 for i in 1:nWeights
     println(f"Optimizing for weight index {i}")
-    local objective, x, t_end = optimizer(i / nWeights; logLevel=0)
-    cost_obj = sum(x[ii,k,v,t]*taskCosts[v][k] for ii=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime)
-    push!(time_objectives, t_end)
+    local objective, x, z, t_end = optimizer(i / nWeights; logLevel=0) # Linearly increase weights across loop
+    cost_obj = (sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime))
+         - sum(revenue * sum(z[s,t] * length(Str[s]) for t=1:nTime) for s=1:nStrs) # recompute the cost (no cost variable in model)
+    push!(time_objectives, t_end) 
     push!(cost_objectives, cost_obj)
 end
 
