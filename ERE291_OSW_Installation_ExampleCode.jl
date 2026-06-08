@@ -18,9 +18,11 @@ Priority of work:
 @author: ryandavies19, kelsey-hartfelder
 """
 
+
 ####################################
 ######### Initialize tools #########
 ####################################
+
 using CSV
 using DataFrames
 using LinearAlgebra
@@ -28,6 +30,7 @@ using JuMP
 using Cbc
 using PyFormattedStrings # to get python style f-string formatting
 using Plots
+
 
 ###############################
 ######### Define Sets #########
@@ -71,7 +74,6 @@ end
 Vessels = VesselTypes[rows, :]
 nVessels = nrow(Vessels)
 
-# TODO: Add backup vessels that can handle worse conditions but are more expensive. This could give a pareto of time vs cost
 
 ###################################################
 ############ Define Parameters and Data ###########
@@ -166,10 +168,35 @@ end
 # Create a weather operability matrix for each vessel and time step, based on the weather sequence and vessel operability by state
 weather = [vesselOperability[v, weatherSequence[t]] for v in 1:nVessels, t in 1:nTime]
 
+# Calculate emissions per vessel per timestep
+ef_co2 = 679.47     # g/kWh, constant across tiers
+V_working = 1.5     # knots, assumed on-site speed
+lf_floor = 0.02     # 2% minimum 
+timestep_hr = 12    # 12-hour timesteps
+
+# Create an empty array to hold the emissions for each vessel
+vesselEmissions = zeros(Float64, nVessels)
+
+for v in 1:nVessels
+    # Propulsive load factor via Propeller Law
+    lf_prop = max((V_working / Vessels.serviceSpeedKN[v])^3, lf_floor)
+    power_prop = Vessels.propPowerKW[v] * lf_prop
+
+    # Auxiliary power 
+    power_aux = Vessels.auxPowerKW[v] * Vessels.auxLF[v]
+
+    # Total power
+    power_total = power_prop + power_aux
+
+    # CO2 emissions per 12-hr timestep [kg]
+    vesselEmissions[v] = timestep_hr * power_total * ef_co2 / 1000
+end
+
 # Check arrays and sizes (TODO expand me)
 @assert length(taskCosts) == nVessels || throw("ERROR: taskCosts must have one entry per vessel")
 @assert all(length(taskCosts[v]) == nTasks for v in 1:nVessels) || throw("ERROR: each vessel must have one cost per task")
 
+    
 """
     optimizer(w1)
 
@@ -181,7 +208,7 @@ Returns:
     - `ObjValue`: (Float) Optimal objective value
     - `x_return`: (Array) Optimal schedule
 """
-function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a function for looping
+function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in a function for looping
 
     ####################################
     ########## Declare model  ##########
@@ -195,6 +222,7 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
 
     # Set the optimizer output verbosity
     set_optimizer_attribute(m, "logLevel", logLevel)
+
 
     ####################################
     ######## Decision variables ########
@@ -212,23 +240,38 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     # z: A binary variable that tracks if a string is complete at time t
     @variable(m, z[1:nStrs, 1:nTime], Bin)
 
+
     ######################################
     ######## Objective Function ##########
     ######################################
+
     # Weighted sum method based on Section 15.3.1 in Algorithms for Optimization - Kochenderfer and Wheeler
 
     # Check valid weight
     @assert (w1 <= 1 && w1 >= 0) || throw("ERROR: weight must be between 0 and 1")
 
-    # Minimize total installation time using a time penalty and cost penalty approach
-    # where there is a cost benefit to completing strings earlier (from eqn 1a in Amorosi et al.)
-    @objective(m, Min, w1 * t_end + (1-w1) *
-        (sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime))
-         - sum(revenue * sum(z[s,t] * length(Str[s]) for t=1:nTime) for s=1:nStrs))
+    # # Minimize total installation time using a time penalty and cost penalty approach
+    # # where there is a cost benefit to completing strings earlier (from eqn 1a in Amorosi et al.)
+    # @objective(m, Min, w1 * t_end + (1-w1) *
+    #     (sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime))
+    #      - sum(revenue * sum(z[s,t] * length(Str[s]) for t=1:nTime) for s=1:nStrs))
+
+    
+    # w2 is implicitly 1 - w1 - w3
+    @assert w1 + w3 <= 1.0 "ERROR: w1 + w3 must be <= 1"
+    w2 = 1 - w1 - w3
+
+    @objective(m, Min, 
+        w1 * t_end + 
+        w2 * (sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime)
+             - sum(revenue * sum(z[s,t] * length(Str[s]) for t=1:nTime) for s=1:nStrs)) +
+        w3 * sum(x[i,k,v,t]*vesselEmissions[v] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime))
+
 
     ######################################
     ############# Constraints ############
     ######################################
+
     # Some of these are inspired by Housner et al. (2026), a forthcoming paper
 
     # Shapes and types:
@@ -279,6 +322,7 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     # String completeness: Once a string is complete, it stays complete
     @constraint(m, [s=1:nStrs, t=2:nTime], z[s,t] >= z[s,t-1])
 
+    
     ######################################
     ########### Print and solve ##########
     ######################################
@@ -294,11 +338,14 @@ function optimizer(w1; threads = 10, logLevel = 1) # put the whole thing in a fu
     z_return = value(z)
     t_end_return = value(t_end)
 
-    return ObjValue, x_return, z_return, t_end_return
+    emissions_return = sum(value(x[i,k,v,t])*vesselEmissions[v] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime)
+    return ObjValue, x_return, z_return, t_end_return, emissions_return
 end
 
 # Run function for time optimization
-objective, x, z, t_end = optimizer(1)
+objective, x, z, t_end, emissions = optimizer(1, 0)      # pure time
+objective, x, z, t_end, emissions = optimizer(0, 1)      # pure emissions
+objective, x, z, t_end, emissions = optimizer(0.5, 0.5)  # equal weight
 
 # Make a nice looking Gantt chart w/ f-strings
 println(f"--- Gantt Chart (start time: {TimeStart}) ---")
@@ -349,15 +396,25 @@ println("-----------------------------------")
 
 # Solve for 10 weights, to get Pareto front
 nWeights = 10
+w3_values = [0.0, 0.25, 0.5]
 time_objectives = []
 cost_objectives = []
-for i in 1:nWeights
-    println(f"Optimizing for weight index {i}")
-    local objective, x, z, t_end = optimizer(i / nWeights; logLevel=0) # Linearly increase weights across loop
-    cost_obj = (sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime))
-         - sum(revenue * sum(z[s,t] * length(Str[s]) for t=1:nTime) for s=1:nStrs) # recompute the cost (no cost variable in model)
-    push!(time_objectives, t_end) 
-    push!(cost_objectives, cost_obj)
+emissions_objectives = []
+w3_labels = []
+
+for w3 in w3_values
+    for ii in 0:nWeights
+        w1 = (ii / nWeights) * (1 - w3)
+        local objective, x, z, t_end, emissions = optimizer(w1, w3; logLevel=0)
+        cost_obj = sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines,
+                      k=1:nTasks, v=1:nVessels, t=1:nTime) -
+                   sum(revenue * sum(z[s,t] * length(Str[s]) for t=1:nTime)
+                      for s=1:nStrs)
+        push!(time_objectives, t_end)
+        push!(cost_objectives, cost_obj)
+        push!(emissions_objectives, emissions)
+        push!(w3_labels, w3)
+    end
 end
 
 # Plot a Pareto front of cost vs duration
@@ -369,5 +426,13 @@ scatter(time_objectives, cost_objectives,
     marker = :circle,
     dpi = 300
 )
-
 savefig("pareto.png")
+
+scatter(time_objectives, cost_objectives, emissions_objectives,
+        xlabel="Time", ylabel="Cost (\$)", zlabel="CO2 (kg)",
+        title="3D Pareto Front",
+        marker_z=float.(w3_labels),
+        colorbar_title="w3",
+        dpi=300)
+
+savefig("pareto_3d.png")

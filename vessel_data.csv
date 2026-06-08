@@ -1,4 +1,5 @@
-vesselType,numVessel,dayRate,maxWind,maxWave,transitSpeed,moorInstall,platformTow,platformHookup,cableInstall
-Anchor Handling Tug Supply,2,107187,15,3,14,1,0,0,0
-Towing Vessel,2,37516,15,3,14,0,1,1,0
-Cable Laying Vessel,2,41171,25,2,11.5,0,0,0,1
+vesselType,numVessel,dayRate,maxWind,maxWave,transitSpeed,propPowerKW,serviceSpeedKN,auxPowerKW,auxLF,moorInstall,platformTow,platformHookup,cableInstall
+Anchor Handling Tug Supply,2,107187,15,3,14,3949.33,14,605.2,0.56,1,0,0,0
+Towing Vessel,2,37516,15,3,14,2395.11,11,69.5,0.43,0,1,1,0
+Cable Laying Vessel,2,41171,25,2,11.5,3949.33,14,605.2,0.56,0,0,0,1
+Anchor Handling Tug Supply (backup),2,150061.8,21,4.2,14,5529.062,14,605.2,0.56,1,0,0,0
