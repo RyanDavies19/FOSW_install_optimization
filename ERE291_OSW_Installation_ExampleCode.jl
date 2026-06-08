@@ -109,7 +109,7 @@ int_inf = typemax(Int)
 
 # Baseline task duration (at the turbine)
 # TODO: make these realistic for the difference vessel types based on table 5.9
-baseDurations = [2, 2, 1, 1]  # [moorInstall, platformTow, platformHookup, cableInstall]. FIXME: set platformTow = 2 for now, but should be 0 when/if distances are completed
+baseDurations = [2, 2, 2, 1]  # [moorInstall, platformTow, platformHookup, cableInstall]. FIXME: set platformTow = 2 for now, but should be 0 when/if distances are completed
 
 # # taskDurations[k] = duration for task k to be completed, including transit times
 # taskDurations = [] # Shape: nTasks array of nVessels arrays of (nTurbines, nTurbines) objects
@@ -144,16 +144,16 @@ taskCosts = [
     for v in 1:nVessels
 ]
 
-# Revenue per turbine once online
-revenue = 25000 # [$/time step] # TODO: make this a more real number
+# Revenue per turbine once online 
+revenue = 9859.5 * 10^3 / 132 / 365 / 2 * 22.62 # (AEP in GWh) * (GWh / MWh) / (132 turbines) / (365 days/yr) / (2 periods / day) * (22.62 $/MWh) = $2314.47 per timestep
 
 # Add in weather constraints for each vessel type
 maxWind  = Vessels.maxWind
 maxWave  = Vessels.maxWave
 
 # Weather state thresholds (three weather states) — from GEE analysis
-stateWorstWind = [10.0, 20.0, Inf]  # upper bound wind for each state
-stateWorstWave = [ 2.0,  3.0, Inf]  # upper bound wave for each state
+stateWorstWind = [10.0, 20.0, Inf]  # upper bound wind for each state [m/s]
+stateWorstWave = [ 2.0,  3.0, Inf]  # upper bound wave for each state [m]
 
 # vesselOperability[v, s] = 1 if vessel v can operate in ALL conditions in state s
 vesselOperability = zeros(Int, nVessels, 3)
@@ -237,7 +237,7 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
     # y_i,k,v: A binary variable that tracks if vessel v is assigned to task k at turbine i
     @variable(m, y[1:nTurbines, 1:nTasks, 1:nVessels], Bin)
 
-    # z: A binary variable that tracks if a string is complete at time t
+    # z_s,t: A binary variable that tracks if a string is complete at time t
     @variable(m, z[1:nStrs, 1:nTime], Bin)
 
 
@@ -294,19 +294,20 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
     # Only valid vessels: Incapable vessels do no work on tasks they cannot perform (necessary for the time objective, because cost is ignored)
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels], sum(x[i,k,v,t] for t=1:nTime) <= taskCapable[v,k] * baseDurations[k])
 
-    # Continuous tasks: Once a task stops, it cannot start again. tt is the time steps after t.
-    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=2:nTime, tt=t+1:nTime], x[i,k,v,tt] <= x[i,k, v, t] - x[i,k,v,t-1] + 1)
+    # Continuous tasks: Once a task stops, it cannot start again. tt is the time steps after t. Modeled off Housner et al. eqn. 16
+    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=2:nTime, tt=t+1:nTime], x[i,k,v,tt] <= x[i,k,v,t] - x[i,k,v,t-1] + 1)
 
-    # Consistent tasks: exactly one vessel is assigned to each (turbine, task) pair
+    # Single vessel per task: exactly one vessel is assigned to each (turbine, task) pair
     @constraint(m, [i=1:nTurbines, k=1:nTasks], sum(y[i,k,v] for v=1:nVessels) == 1)
 
     # Vessel usage: A vessel can only do task k at turbine i if it is assigned to it
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels], sum(x[i,k,v,t] for t=1:nTime) <= baseDurations[k] * y[i,k,v])
 
-    # Dependency: Task k+1 cannot begin until task k is fully completed at turbine i. If task k+1 is active at t, then the sum of task k times to t-1 across all vessels needs to be baseDurations (i.e. any vessel doing task k needs to be finished).
+    # Task Dependency: Task k+1 cannot begin until task k is fully completed at turbine i. If task k+1 is active at t, then the sum of task k times to t-1 across all vessels 
+    # needs to be baseDurations (i.e. any vessel doing task k needs to be finished). Modeled off Housner et al. eqn. 19
     @constraint(m, [i=1:nTurbines, k=1:nTasks-1, v=1:nVessels, t=1:nTime], x[i,k+1,v,t] * baseDurations[k] <= sum(x[i,k,vv,tt] for vv=1:nVessels, tt=1:t-1))
 
-    # Resource limit: sum of active tasks (across all turbines) cannot exceed your available vessels (e.g., you only have 1 cable-laying vessel, so only one turbine can have Task 1 active per timestep).
+    # Resource limit:  Each vessel v can only be assigned to one turbine-task pair in timestep t. This ensures that vessels are not assigned to simultaneous tasks.
     @constraint(m, [t=1:nTime, v=1:nVessels], sum(x[i,k,v,t] for i = 1:nTurbines, k = 1:nTasks) <= 1)
 
     # Weather constraints: if weather conditions at time t prevent vessel v from operating, then x[i,k,v,t] must be 0 for all i and k. We can use the weather operability matrix we created above to enforce this.
@@ -328,7 +329,7 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
     ######################################
 
     # print(m)
-    set_optimizer_attribute(m, "seconds", 120) # solver time limit
+    # set_optimizer_attribute(m, "seconds", 600) # solver time limit
 
     optimize!(m)
 
