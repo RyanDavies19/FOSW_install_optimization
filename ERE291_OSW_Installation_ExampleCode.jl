@@ -322,7 +322,7 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
     # String completeness: Once a string is complete, it stays complete
     @constraint(m, [s=1:nStrs, t=2:nTime], z[s,t] >= z[s,t-1])
 
-    
+
     ######################################
     ########### Print and solve ##########
     ######################################
@@ -345,7 +345,9 @@ end
 # Run function for time optimization
 objective, x, z, t_end, emissions = optimizer(1, 0)      # pure time
 objective, x, z, t_end, emissions = optimizer(0, 1)      # pure emissions
-objective, x, z, t_end, emissions = optimizer(0.5, 0.5)  # equal weight
+w1 = 0.5
+w3 = 0.5
+objective, x, z, t_end, emissions = optimizer(w1, w3)    # equal weight
 
 # Make a nice looking Gantt chart w/ f-strings
 println(f"--- Gantt Chart (start time: {TimeStart}) ---")
@@ -390,9 +392,92 @@ println("O - Task is active")
 println(". - Task could be active but is not")
 println("-----------------------------------")
 
-# TODO: save Gantt chart to txt file, useful for when looking at Pareto fronts
+# Save Gantt chart to txt file
+open("gantt_chart.txt", "w") do io
+    println(io, f"--- Gantt Chart (start time: {TimeStart}, w1={w1}, w3={w3}) ---")
+    println(io, header)
+    println(io, "-" ^ length(header))
+    print(io, "        |                  |        |")
+    for t in 1:nTime
+        print(io, f"  {weatherSequence[t]:1d}")
+    end
+    print(io, "\n")
+    println(io, "-" ^ length(header))
 
-# TODO: plot of cost over time
+    for i in 1:nTurbines
+        for k in 1:nTasks
+            assigned_vessel = "-"
+            for v in 1:nVessels
+                if sum(round(Int, x[i,k,v,t]) for t in 1:nTime) > 0
+                    assigned_vessel = v
+                    break
+                end
+            end
+            print(io, f"   {i:2d}   | {Tasks[k]:16s} |   {assigned_vessel:1d}    |")
+            for t in 1:nTime
+                if assigned_vessel != "-" && round(Int, x[i,k,assigned_vessel,t]) == 1
+                    cell = "  O"
+                elseif assigned_vessel != "-" && weather[assigned_vessel,t] == 0
+                    cell = "  X"
+                else
+                    cell = "  ."
+                end
+                print(io, cell)
+            end
+            print(io, "\n")
+        end
+        println(io, "-" ^ length(header))
+    end
+    println(io, "Legend:")
+    println(io, "X - Task is inactive due to weather")
+    println(io, "O - Task is active")
+    println(io, ". - Task could be active but is not")
+end
+println("Gantt chart saved to gantt_chart.txt")
+
+# Plot cumulative cost over time
+# At each timestep, accumulate vessel costs minus string revenue earned so far
+cumulative_cost = zeros(Float64, nTime)
+for t in 1:nTime
+    # Add vessel operating costs at this timestep
+    vessel_cost_t = sum(round(Int, x[i,k,v,t]) * taskCosts[v][k] 
+                       for i=1:nTurbines, k=1:nTasks, v=1:nVessels
+                       if taskCosts[v][k] < int_inf)
+
+    # Subtract string revenue earned at this timestep
+    string_revenue_t = sum(round(Int, z[s,t]) * revenue * length(Str[s]) 
+                          for s=1:nStrs)
+
+    # Cumulative sum
+    cumulative_cost[t] = (t > 1 ? cumulative_cost[t-1] : 0) + vessel_cost_t - string_revenue_t
+end
+
+plot(1:nTime, cumulative_cost,
+    xlabel = "Timestep (12-hr periods, starting at $(TimeStart))",
+    ylabel = "Cumulative Net Cost (\$)",
+    title  = "Cumulative Installation Cost Over Time",
+    legend = false,
+    linewidth = 2,
+    color = :blue,
+    dpi = 300
+)
+
+# Add vertical lines when each string comes online
+for s in 1:nStrs
+    # Find first timestep where string s is complete
+    completion_t = findfirst(t -> round(Int, z[s,t]) == 1, 1:nTime)
+    if !isnothing(completion_t)
+        vline!([completion_t], 
+               label = f"String {s} online",
+               linestyle = :dash,
+               color = s == 1 ? :green : :orange)
+        annotate!(completion_t, cumulative_cost[completion_t], 
+                 text(f"Str {s}", 8, :left))
+    end
+end
+
+savefig("cost_over_time.png")
+println("Cost over time plot saved to cost_over_time.png")
 
 # Solve for 10 weights, to get Pareto front
 nWeights = 10
