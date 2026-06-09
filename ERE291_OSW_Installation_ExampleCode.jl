@@ -258,18 +258,13 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
 
     # Check valid weight
     @assert (w1 <= 1 && w1 >= 0) || throw("ERROR: weight must be between 0 and 1")
-
-    # # Minimize total installation time using a time penalty and cost penalty approach
-    # # where there is a cost benefit to completing strings earlier (from eqn 1a in Amorosi et al.)
-    # @objective(m, Min, w1 * t_end + (1-w1) *
-    #     (sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime))
-    #      - sum(revenue * sum(z[s,t] * length(Str[s]) for t=1:nTime) for s=1:nStrs))
-
     
     # w2 is implicitly 1 - w1 - w3
     @assert w1 + w3 <= 1.0 "ERROR: w1 + w3 must be <= 1"
     w2 = 1 - w1 - w3
 
+    # Minimize total installation time using a time penalty, cost penalty, and emissions penalty approach
+    # where there is a cost benefit to completing strings earlier (from eqn 1a in Amorosi et al.)
     @objective(m, Min, 
         w1 * t_end + 
         w2 * (sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime)
