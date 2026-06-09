@@ -12,8 +12,8 @@ Priority of work:
 - [X] 2. More realistic task lengths and vessel costs
 - [X] 3. Cost function for install (right now are fixed because they are tied to tasks and all vessels are the same for the tasks)
 - [X] 4. Sets of turbines in strings
-- [ ] 5. Distance between turbines and port in the cost (this will make a more meaningful patero for the costs)
-- [ ] 6. Time permitting: emissions
+- [ ] 5. Distance between turbines and port in the cost (this will make a more meaningful pareto for the costs)
+- [X] 6. Time permitting: emissions
 
 @author: ryandavies19, kelsey-hartfelder
 """
@@ -41,7 +41,7 @@ maxTurbines = 4 # start with 2x2 array of turbines
 Turbines = collect(1:maxTurbines)
 nTurbines = length(Turbines)
 
-# Set of turbine strings, containing turbine indicies. 
+# Set of turbine strings, containing turbine indicies
 Str = [[1,3],[2,4]]
 nStrs = length(Str)
 @assert all(i in vcat(Str...) for i in Turbines) || throw("ERROR: all turbines must belong to a string")
@@ -82,6 +82,7 @@ nVessels = nrow(Vessels)
 # Integer representation of inifintely high value. Useful for big M method
 int_inf = typemax(Int)
 
+## UNFINISHED: Port and Turbine Locations
 # # Turbine locations [m]
 # TurbLoc = [[-500,500], [-500,1000], [500,500], [500,1000]] # assume turbines are 1 km apart in a grid
 # @assert length(TurbLoc) == nTurbines || throw("ERROR: Mismatch in nTurbines and num Turbine Locations")
@@ -108,9 +109,9 @@ int_inf = typemax(Int)
 # end
 
 # Baseline task duration (at the turbine)
-# TODO: make these realistic for the difference vessel types based on table 5.9
 baseDurations = [2, 2, 2, 1]  # [moorInstall, platformTow, platformHookup, cableInstall]. FIXME: set platformTow = 2 for now, but should be 0 when/if distances are completed
 
+## UNFINISHED: Overall Task Durations
 # # taskDurations[k] = duration for task k to be completed, including transit times
 # taskDurations = [] # Shape: nTasks array of nVessels arrays of (nTurbines, nTurbines) objects
 # for (k, task) in enumerate(Tasks)
@@ -152,8 +153,8 @@ maxWind  = Vessels.maxWind
 maxWave  = Vessels.maxWave
 
 # Weather state thresholds (three weather states) — from GEE analysis
-stateWorstWind = [10.0, 20.0, Inf]  # upper bound wind for each state [m/s]
-stateWorstWave = [ 2.0,  3.0, Inf]  # upper bound wave for each state [m]
+stateWorstWind = [10.0, 20.0, Inf]  # upper bound wind for each category [m/s]
+stateWorstWave = [ 2.0,  3.0, Inf]  # upper bound wave for each category [m]
 
 # vesselOperability[v, s] = 1 if vessel v can operate in ALL conditions in state s
 vesselOperability = zeros(Int, nVessels, 3)
@@ -169,20 +170,20 @@ end
 weather = [vesselOperability[v, weatherSequence[t]] for v in 1:nVessels, t in 1:nTime]
 
 # Calculate emissions per vessel per timestep
-ef_co2 = 679.47     # g/kWh, constant across tiers
-V_working = 1.5     # knots, assumed on-site speed TODO make this more
-lf_floor = 0.02     # 2% minimum 
+ef_co2 = 679.47     # g/kWh
+V_working = 1.5     # knots
+lf_floor = 0.02     # 2% min
 timestep_hr = 12    # 12-hour timesteps
 
-# Create an empty array to hold the emissions for each vessel
+# Create empty array to hold the emissions for each vessel
 vesselEmissions = zeros(Float64, nVessels)
 
 for v in 1:nVessels
-    # Propulsive load factor via Propeller Law
+    # Propulsive power consumption
     lf_prop = max((V_working / Vessels.serviceSpeedKN[v])^3, lf_floor)
     power_prop = Vessels.propPowerKW[v] * lf_prop
 
-    # Auxiliary power 
+    # Auxiliary power consumption
     power_aux = Vessels.auxPowerKW[v] * Vessels.auxLF[v]
 
     # Total power
@@ -192,7 +193,7 @@ for v in 1:nVessels
     vesselEmissions[v] = timestep_hr * power_total * ef_co2 / 1000
 end
 
-# Check arrays and sizes (TODO expand me)
+# Check arrays and sizes
 @assert length(taskCosts) == nVessels || throw("ERROR: taskCosts must have one entry per vessel")
 @assert all(length(taskCosts[v]) == nTasks for v in 1:nVessels) || throw("ERROR: each vessel must have one cost per task")
 
@@ -292,10 +293,6 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
     # - taskCosts:     nVessels array of nTasks arrays of (scalar per vessel/task) objects, Int
     # - weather:       (nVessels, nTime), binary
 
-    # TODO: this is complaining of infeasibility when using taskDurations[k][v][i,i], which should return just the base durations. 
-    # Need some form of tracking that says which turbine was visited last, for the (i,i) indexing. Need to figure out why it is 
-    # saying infeasible.
-
     # Task completion: The total duration spent on a task at a turbine across all vessels must be the duration of the task. This also ensures each task is only completed once.
     @constraint(m, [i=1:nTurbines, k=1:nTasks], sum(x[i,k,v,t] for v=1:nVessels, t=1:nTime) == baseDurations[k])
 
@@ -351,14 +348,14 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
     return ObjValue, x_return, z_return, t_end_return, emissions_return
 end
 
-# Run function for time optimization — store each scenario's results
+# Run function for weight scenarios + store results
 obj_time,  x_time,  z_time,  t_end_time,  em_time  = optimizer(1.0, 0.0)   # pure time
 obj_emit,  x_emit,  z_emit,  t_end_emit,  em_emit  = optimizer(0.0, 1.0)   # pure emissions
 w1 = 0.33
 w3 = 0.34
 obj_equal, x_equal, z_equal, t_end_equal, em_equal = optimizer(w1,  w3)    # equal weight
 
-# Use equal-weight results for the Gantt chart below
+# Use equal-weight results for  Gantt chart
 objective, x, z, t_end, emissions = obj_equal, x_equal, z_equal, t_end_equal, em_equal
 
 # Build header string (used by Gantt chart file below)
@@ -405,7 +402,6 @@ open("gantt_chart.txt", "w") do io
     println(io, "O - Task is active")
     println(io, ". - Task could be active but is not")
 end
-println("Gantt chart saved to gantt_chart.txt")
 
 # Plot cumulative cost over time
 # At each timestep, accumulate vessel costs minus string revenue earned so far
@@ -413,12 +409,12 @@ cumulative_cost = zeros(Float64, nTime)
 cumulative_vessel_cost = zeros(Float64, nTime)
 cumulative_string_revenue = zeros(Float64, nTime)
 for t in 1:nTime
-    # Add vessel operating costs at this timestep
+    # Add vessel operating costs
     vessel_cost_t = sum(round(Int, x[i,k,v,t]) * taskCosts[v][k] 
                        for i=1:nTurbines, k=1:nTasks, v=1:nVessels
                        if taskCosts[v][k] < int_inf)
 
-    # Subtract string revenue earned at this timestep
+    # Subtract string revenue earned
     string_revenue_t = sum(round(Int, z[s,t]) * revenue * length(Str[s]) 
                           for s=1:nStrs)
 
@@ -465,7 +461,6 @@ for s in 1:nStrs
 end
 
 savefig("cost_over_time.png")
-println("Cost over time plot saved to cost_over_time.png")
 
 # Triangular grid sweep over the full weight simplex
 nSteps = 5  # gives 21 weight combinations
@@ -486,26 +481,9 @@ for i in 0:nSteps
     end
 end
 
-# 2D Pareto: Time vs Cost, each point colored by its w3 (emissions weight)
-p2d = scatter(
-    [r.time_days for r in results],
-    [r.cost_k    for r in results],
-    marker_z          = [r.w3 for r in results],
-    colorbar_title    = "w₃ (emissions weight)",
-    color             = :plasma,
-    xlabel            = "Installation Duration (days)",
-    ylabel            = "Installation Cost (\$K)",
-    title             = "Pareto Front: Time vs. Installation Cost",
-    markersize        = 8,
-    markerstrokewidth = 0,
-    dpi               = 300
-)
-savefig(p2d, "pareto.png")
-
 # Export results CSV for ternary plot — run plot_ternary.py to generate pareto_ternary.png
 results_df = DataFrame(results)
 CSV.write("pareto_results.csv", results_df)
-println("Pareto results saved to pareto_results.csv")
 
 
 ####################################
