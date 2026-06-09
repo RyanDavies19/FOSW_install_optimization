@@ -443,54 +443,45 @@ end
 savefig("cost_over_time.png")
 println("Cost over time plot saved to cost_over_time.png")
 
-# Solve for 10 weights, to get Pareto front
-nWeights = 10
-w3_values = [0.0, 0.25, 0.5]
-time_objectives = []
-cost_objectives = []
-emissions_objectives = []
-w3_labels = []
-
-for w3 in w3_values
-    for ii in 0:nWeights
-        w1 = (ii / nWeights) * (1 - w3)
-        local objective, x, z, t_end, emissions = optimizer(w1, w3; logLevel=0)
-        cost_obj = sum(x[i,k,v,t]*taskCosts[v][k] for i=1:nTurbines,
-                      k=1:nTasks, v=1:nVessels, t=1:nTime) -
-                   sum(revenue * sum(z[s,t] * length(Str[s]) for t=1:nTime)
-                      for s=1:nStrs)
-        push!(time_objectives, t_end)
-        push!(cost_objectives, cost_obj)
-        push!(emissions_objectives, emissions)
-        push!(w3_labels, w3)
+# Triangular grid sweep over the full weight simplex
+nSteps = 5  # gives 21 weight combinations
+results = []
+for i in 0:nSteps
+    for j in 0:nSteps-i
+        w1 = i / nSteps
+        w3 = j / nSteps
+        w2 = 1 - w1 - w3
+        local obj, x, z, t_end, emissions = optimizer(w1, w3; logLevel=0)
+        cost_obj = sum(x[ii,k,v,t]*taskCosts[v][k] for ii=1:nTurbines,
+                      k=1:nTasks, v=1:nVessels, t=1:nTime
+                      if taskCosts[v][k] < int_inf)
+        push!(results, (w1=w1, w2=w2, w3=w3,
+                        time_days=t_end*0.5,
+                        cost_k=cost_obj/1000,
+                        emissions_kg=emissions))
     end
 end
 
-# Plot 2D Pareto front — one series per w3 value
-pareto_colors = [:blue, :orange, :red]
-p2d = plot(
-    xlabel = "Installation Duration (timesteps)",
-    ylabel = "Net Cost (\$)",
-    title  = "Pareto Front: Installation Time vs. Cost",
-    dpi    = 300
+# 2D Pareto: Time vs Cost, each point colored by its w3 (emissions weight)
+p2d = scatter(
+    [r.time_days for r in results],
+    [r.cost_k    for r in results],
+    marker_z          = [r.w3 for r in results],
+    colorbar_title    = "w₃ (emissions weight)",
+    color             = :plasma,
+    xlabel            = "Installation Duration (days)",
+    ylabel            = "Installation Cost (\$K)",
+    title             = "Pareto Front: Time vs. Installation Cost",
+    markersize        = 8,
+    markerstrokewidth = 0,
+    dpi               = 300
 )
-for (i, wv) in enumerate(w3_values)
-    idx = findall(w3_labels .== wv)
-    scatter!(p2d, time_objectives[idx], cost_objectives[idx],
-             label  = "w3 = $(wv)",
-             color  = pareto_colors[i],
-             marker = :circle)
-end
 savefig(p2d, "pareto.png")
 
-scatter(time_objectives, cost_objectives, emissions_objectives,
-        xlabel="Time", ylabel="Cost (\$)", zlabel="CO2 (kg)",
-        title="3D Pareto Front",
-        marker_z=float.(w3_labels),
-        colorbar_title="w3",
-        dpi=300)
-
-savefig("pareto_3d.png")
+# Export results CSV for ternary plot — run plot_ternary.py to generate pareto_ternary.png
+results_df = DataFrame(results)
+CSV.write("pareto_results.csv", results_df)
+println("Pareto results saved to pareto_results.csv")
 
 
 ####################################
