@@ -198,15 +198,23 @@ end
 
     
 """
-    optimizer(w1)
+    optimizer(w1, w3; threads=10, logLevel=1)
 
-Arguments:
-    - `w1`: (Float) Weight on the time objective. Must satisfy 0 <= w1 <= 1.
-      The cost objective weight is set to (1 - w1).
+Parameters:
+-----------
+    - `w1`: (Float) Weight on the time objective. 
+    - `w3`: (Float) Weight on the emissions objective.
+      The cost objective weight `w2` is set to `1 - w1 - w3`.
+    - `threads`: (Int) Number of threads for the solver
+    - `logLevel`: (Int) Verbosity of solver output.
 
 Returns:
+--------
     - `ObjValue`: (Float) Optimal objective value
     - `x_return`: (Array) Optimal schedule
+    - `z_return`: (Array) String completion status
+    - `t_end_return`: (Int) Timestep at which the last task is completed
+    - `emissions_return`:(Float) Total CO2 emissions [kg] across all vessels and timesteps
 """
 function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in a function for looping
 
@@ -319,7 +327,7 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
     # String completeness: z[s,t] = 0 if all turbines in string s have not been completed: 
     #    Z * (theoretical time to complete all tasks in the string) <= (actual time taken before t for all tasks at the turbines in the string), and objective pushes z to 1 early
     @constraint(m, [s=1:nStrs, t=1:nTime], z[s,t] * sum(baseDurations) * length(Str[s]) <= sum(x[i,k,v,tt] for i in Str[s], k=1:nTasks, v=1:nVessels, tt=1:t))
-    
+
     # String completeness: Once a string is complete, it stays complete
     @constraint(m, [s=1:nStrs, t=2:nTime], z[s,t] >= z[s,t-1])
 
@@ -402,6 +410,8 @@ println("Gantt chart saved to gantt_chart.txt")
 # Plot cumulative cost over time
 # At each timestep, accumulate vessel costs minus string revenue earned so far
 cumulative_cost = zeros(Float64, nTime)
+cumulative_vessel_cost = zeros(Float64, nTime)
+cumulative_string_revenue = zeros(Float64, nTime)
 for t in 1:nTime
     # Add vessel operating costs at this timestep
     vessel_cost_t = sum(round(Int, x[i,k,v,t]) * taskCosts[v][k] 
@@ -412,18 +422,32 @@ for t in 1:nTime
     string_revenue_t = sum(round(Int, z[s,t]) * revenue * length(Str[s]) 
                           for s=1:nStrs)
 
-    # Cumulative sum
-    cumulative_cost[t] = (t > 1 ? cumulative_cost[t-1] : 0) + vessel_cost_t - string_revenue_t
+    # Cumulative sums
+    cumulative_vessel_cost[t]   = (t > 1 ? cumulative_vessel_cost[t-1]   : 0) + vessel_cost_t
+    cumulative_string_revenue[t] = (t > 1 ? cumulative_string_revenue[t-1] : 0) + string_revenue_t
+    cumulative_cost[t]          = cumulative_vessel_cost[t] - cumulative_string_revenue[t]
 end
 
 plot(1:nTime, cumulative_cost,
     xlabel = "Timestep (12-hr periods, starting at $(TimeStart))",
-    ylabel = "Cumulative Net Cost (\$)",
+    ylabel = "Cumulative Cost (\$)",
     title  = "Cumulative Installation Cost Over Time",
-    legend = false,
+    label  = "Net Cost",
     linewidth = 2,
     color = :blue,
     dpi = 300
+)
+plot!(1:nTime, cumulative_vessel_cost,
+    label = "Vessel Cost",
+    linewidth = 2,
+    color = :red,
+    linestyle = :dash
+)
+plot!(1:nTime, -cumulative_string_revenue,
+    label = "String Revenue",
+    linewidth = 2,
+    color = :green,
+    linestyle = :dot
 )
 
 # Add vertical lines when each string comes online
