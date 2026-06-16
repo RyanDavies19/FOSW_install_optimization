@@ -53,7 +53,7 @@ Time = collect(TimeStart:TimeEnd)
 nTime = length(Time)
 
 # Set of weather conditions (12-hour timesteps, based on GEE analysis of Gulf of Maine data)
-weather_df = CSV.read("gulf_of_maine_weather_states_12hourly.csv", DataFrame)
+weather_df = CSV.read("Data/gulf_of_maine_weather_states_12hourly.csv", DataFrame)
 weatherSequence = weather_df.weather_state[TimeStart:TimeEnd]
 
 # Set of tasks
@@ -61,7 +61,7 @@ Tasks = ["moorInstall", "platformTow", "platformHookup", "cableInstall"] # names
 nTasks = length(Tasks)
 
 # Set of vessel types
-VesselTypes = CSV.read("vessel_data.csv", DataFrame)
+VesselTypes = CSV.read("Data/vessel_data.csv", DataFrame)
 nVesselTypes = nrow(VesselTypes)
 
 # Set of vessels (repeats each VesselType row numVessel times)
@@ -71,7 +71,7 @@ for type in 1:nVesselTypes
         push!(rows, type)
     end
 end
-Vessels = VesselTypes[rows, :]
+Vessels = VesselTypes[rows, :] # one row per vessel instance (may have duplicate types)
 nVessels = nrow(Vessels)
 
 
