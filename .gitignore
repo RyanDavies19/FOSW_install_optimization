@@ -2,4 +2,5 @@
 *.gsheet
 *.txt
 *.png
+*.log
 pareto_results.csv

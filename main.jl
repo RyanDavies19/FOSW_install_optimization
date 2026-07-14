@@ -15,7 +15,7 @@ Priority of work:
 - [ ] 5. Distance between turbines and port in the cost (this will make a more meaningful pareto for the costs)
 - [X] 6. Time permitting: emissions
 
-@author: ryandavies19, kelsey-hartfelder
+@author: ryandavies19, kelsey-hartfelder, Claude (Sonnet 5)
 """
 
 
@@ -27,7 +27,7 @@ using CSV
 using DataFrames
 using LinearAlgebra
 using JuMP
-using Cbc
+using HiGHS
 using PyFormattedStrings # to get python style f-string formatting
 using Plots
 
@@ -37,18 +37,18 @@ using Plots
 ###############################
 
 # Set of turbines
-maxTurbines = 4 # start with 2x2 array of turbines
+maxTurbines = 8 # start with 2x2 array of turbines
 Turbines = collect(1:maxTurbines)
 nTurbines = length(Turbines)
 
 # Set of turbine strings, containing turbine indicies
-Str = [[1,3],[2,4]]
+Str = [[1,3,5,7],[2,4,6,8]]
 nStrs = length(Str)
-@assert all(i in vcat(Str...) for i in Turbines) || throw("ERROR: all turbines must belong to a string")
+@assert sort(vcat(Str...)) == Turbines || throw("ERROR: turbine strings must partition the turbine set")
 
 # Set of timesteps.
 TimeStart = 200 # RD: 0-200 has a lot of infeasible sea states
-TimeEnd = 225
+TimeEnd = 230
 Time = collect(TimeStart:TimeEnd)
 nTime = length(Time)
 
@@ -136,11 +136,12 @@ taskCapable = Matrix(Vessels[:, [:moorInstall, :platformTow, :platformHookup, :c
 
 # Task costs: how much does it cost to do each task
 # taskCosts[v][k] = cost for vessel v doing task k per timestep
-# If vessel can't do the task, cost is int_inf
+# If vessel can't do the task, set cost to 0 (decision var is forced 0 by the "Only valid vessels" 
+# constraint; no need for a Big-M placeholder - Int_inf triggered HiGHS numerical warnings)
 # Divide day rate by 2 because timesteps are 12-hour intervals, not full days
 dayRates = Vessels.dayRate
 taskCosts = [
-    [taskCapable[v, k] == 1 ? dayRates[v] / 2 : int_inf 
+    [taskCapable[v, k] == 1 ? dayRates[v] / 2 : 0
      for k in 1:nTasks]
     for v in 1:nVessels
 ]
@@ -223,15 +224,21 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
     ########## Declare model  ##########
     ####################################
 
-    m = Model(Cbc.Optimizer) 
+    m = Model(HiGHS.Optimizer) 
     # Note: if complaining of infeasibility, try increasing time window
 
     # Set the number of threads to use for running in parallel
     set_optimizer_attribute(m, "threads", threads)
+    set_optimizer_attribute(m, "parallel", "on")
+
+    # Set the relative optimality gap to 5%
+    set_optimizer_attribute(m, "mip_rel_gap", 0.05)
 
     # Set the optimizer output verbosity
-    set_optimizer_attribute(m, "logLevel", logLevel)
+    # set_optimizer_attribute(m, "log_to_console", false)
 
+    # Save solver logs
+    set_optimizer_attribute(m, "log_file", "solver_output.log")
 
     ####################################
     ######## Decision variables ########
@@ -248,6 +255,11 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
 
     # z_s,t: A binary variable that tracks if a string is complete at time t
     @variable(m, z[1:nStrs, 1:nTime], Bin)
+
+    # start_i,k,v,t: A continuous [0,1] variable that tracks if vessel v begins task k at turbine i at timestep t; does not
+    # need to be binary because the constraints below force it to behave correctly given binary x.
+    # NEW SINCE REPORT.
+    @variable(m, 0 <= start[1:nTurbines, 1:nTasks, 1:nVessels, 1:nTime] <= 1)
 
 
     ######################################
@@ -287,40 +299,46 @@ function optimizer(w1, w3; threads = 10, logLevel = 1) # put the whole thing in 
     # - taskDurations: nTasks array of nVessels arrays of (nTurbines, nTurbines) objects, Int
     # - taskCosts:     nVessels array of nTasks arrays of (scalar per vessel/task) objects, Int
     # - weather:       (nVessels, nTime), binary
+    # - start:         (nTurbines, nTasks, nVessels, nTime), continuous [0,1]
 
-    # Task completion: The total duration spent on a task at a turbine across all vessels must be the duration of the task. This also ensures each task is only completed once.
+    # 1) Task completion: The total duration spent on a task at a turbine across all vessels must be the duration of the task. This also ensures each task is only completed once.
     @constraint(m, [i=1:nTurbines, k=1:nTasks], sum(x[i,k,v,t] for v=1:nVessels, t=1:nTime) == baseDurations[k])
 
-    # Only valid vessels: Incapable vessels do no work on tasks they cannot perform (necessary for the time objective, because cost is ignored)
+    # 2) Only valid vessels: Incapable vessels do no work on tasks they cannot perform (necessary for the time objective, because cost is ignored)
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels], sum(x[i,k,v,t] for t=1:nTime) <= taskCapable[v,k] * baseDurations[k])
 
-    # Continuous tasks: Once a task stops, it cannot start again. tt is the time steps after t. Modeled off Housner et al. eqn. 16
-    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=2:nTime, tt=t+1:nTime], x[i,k,v,tt] <= x[i,k,v,t] - x[i,k,v,t-1] + 1)
+    # 3) Continuous tasks: Once a task stops, it cannot start again. This ensures no tasks are repeated.
+    # start[i,k,v,t] must be >= 1 at every timestep where x[i,k,v,t] rises from 0 to 1, and max 1 rise is allowed per (i,k,v).
+    # NEW SINCE REPORT, replaces previous continuous tasks: O(nTime^2) --> O(nTime). Old approach made the MIP effectively unsolvable at scale.
+    # This more closely follows Housner et al. 2026 constraints 12, 14-16
+    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels], start[i,k,v,1] >= x[i,k,v,1])
+    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=2:nTime], start[i,k,v,t] >= x[i,k,v,t] - x[i,k,v,t-1])
+    @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels], sum(start[i,k,v,t] for t=1:nTime) <= 1)
 
-    # Single vessel per task: exactly one vessel is assigned to each (turbine, task) pair
+    # 4) Single vessel per task: exactly one vessel is assigned to each (turbine, task) pair
     @constraint(m, [i=1:nTurbines, k=1:nTasks], sum(y[i,k,v] for v=1:nVessels) == 1)
 
-    # Vessel usage: A vessel can only do task k at turbine i if it is assigned to it
+    # 5) Vessel usage: A vessel can only do task k at turbine i if it is assigned to it
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels], sum(x[i,k,v,t] for t=1:nTime) <= baseDurations[k] * y[i,k,v])
 
-    # Task Dependency: Task k+1 cannot begin until task k is fully completed at turbine i. If task k+1 is active at t, then the sum of task k times to t-1 across all vessels 
+    # 6) Task Dependency: Task k+1 cannot begin until task k is fully completed at turbine i. If task k+1 is active at t, then the sum of task k times to t-1 across all vessels 
     # needs to be baseDurations (i.e. any vessel doing task k needs to be finished). Modeled off Housner et al. eqn. 19
     @constraint(m, [i=1:nTurbines, k=1:nTasks-1, v=1:nVessels, t=1:nTime], x[i,k+1,v,t] * baseDurations[k] <= sum(x[i,k,vv,tt] for vv=1:nVessels, tt=1:t-1))
 
-    # Resource limit:  Each vessel v can only be assigned to one turbine-task pair in timestep t. This ensures that vessels are not assigned to simultaneous tasks.
+    # 7) Resource limit:  Each vessel v can only be assigned to one turbine-task pair in timestep t. This ensures that vessels are not assigned to simultaneous tasks.
     @constraint(m, [t=1:nTime, v=1:nVessels], sum(x[i,k,v,t] for i = 1:nTurbines, k = 1:nTasks) <= 1)
 
-    # Weather constraints: if weather conditions at time t prevent vessel v from operating, then x[i,k,v,t] must be 0 for all i and k. We can use the weather operability matrix we created above to enforce this.
+    # 8) Weather constraints: if weather conditions at time t prevent vessel v from operating, then x[i,k,v,t] must be 0 for all i and k. We can use the weather operability matrix we created above to enforce this.
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime], x[i,k,v,t] <= weather[v,t])
     
-    # Set ending time: t_end must be >= the last time step any task is active. This sets t_end as the time the last task is completed.
+    # 9) Set ending time: t_end must be >= the last time step any task is active. This sets t_end as the time the last task is completed.
     @constraint(m, [i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime], t_end >= t * x[i,k,v,t])
 
-    # String completeness: z[s,t] = 0 if all turbines in string s have not been completed: 
+    # 10) String completeness: z[s,t] = 0 if all turbines in string s have not been completed: 
     #    Z * (theoretical time to complete all tasks in the string) <= (actual time taken before t for all tasks at the turbines in the string), and objective pushes z to 1 early
     @constraint(m, [s=1:nStrs, t=1:nTime], z[s,t] * sum(baseDurations) * length(Str[s]) <= sum(x[i,k,v,tt] for i in Str[s], k=1:nTasks, v=1:nVessels, tt=1:t))
 
-    # String completeness: Once a string is complete, it stays complete
+    # 11) String completeness: Once a string is complete, it stays complete
     @constraint(m, [s=1:nStrs, t=2:nTime], z[s,t] >= z[s,t-1])
 
 
@@ -405,9 +423,8 @@ cumulative_vessel_cost = zeros(Float64, nTime)
 cumulative_string_revenue = zeros(Float64, nTime)
 for t in 1:nTime
     # Add vessel operating costs
-    vessel_cost_t = sum(round(Int, x[i,k,v,t]) * taskCosts[v][k] 
-                       for i=1:nTurbines, k=1:nTasks, v=1:nVessels
-                       if taskCosts[v][k] < int_inf)
+    vessel_cost_t = sum(round(Int, x[i,k,v,t]) * taskCosts[v][k]
+                       for i=1:nTurbines, k=1:nTasks, v=1:nVessels)
 
     # Subtract string revenue earned
     string_revenue_t = sum(round(Int, z[s,t]) * revenue * length(Str[s]) 
@@ -437,7 +454,7 @@ plot!(1:nTime, cumulative_vessel_cost,
 plot!(1:nTime, -cumulative_string_revenue,
     label = "String Revenue",
     linewidth = 2,
-    color = :green,
+    color = :purple,
     linestyle = :dot
 )
 

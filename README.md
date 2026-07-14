@@ -33,7 +33,7 @@ Data/
 
 **Julia**:
 ```
-CSV, DataFrames, LinearAlgebra, JuMP, Cbc, PyFormattedStrings, Plots
+CSV, DataFrames, LinearAlgebra, JuMP, HiGHS, PyFormattedStrings, Plots
 ```
 
 **Python** (for `plot_ternary.py`):
@@ -74,7 +74,7 @@ python plot_ternary.py
 
 ## Scalability Note
 
-Runtime scales steeply with the number of turbines and timesteps. The 4-turbine case solves in ~60 seconds (CBC, 10 threads, Apple Silicon M4). The 12-turbine case did not converge within 24 hours. See the report's Discussion section for mitigation strategies.
+Runtime scales steeply with the number of turbines and timesteps. The 4-turbine case solves in ~60 seconds (CBC, 10 threads, Apple Silicon M4). The 12-turbine case did not converge within 24 hours using CBC. See the report's Discussion section for mitigation strategies. Deploying HiGHS improves performance significantly, but scaling challenges still may remain at large array-scale. 
 
 ---
 
