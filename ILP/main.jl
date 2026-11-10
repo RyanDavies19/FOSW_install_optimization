@@ -37,23 +37,23 @@ using Plots
 ###############################
 
 # Set of turbines
-maxTurbines = 8 # start with 2x2 array of turbines
+maxTurbines = 4 # start with 2x2 array of turbines
 Turbines = collect(1:maxTurbines)
 nTurbines = length(Turbines)
 
 # Set of turbine strings, containing turbine indicies
-Str = [[1,3,5,7],[2,4,6,8]]
+Str = [[1,3],[2,4]]
 nStrs = length(Str)
 @assert sort(vcat(Str...)) == Turbines || throw("ERROR: turbine strings must partition the turbine set")
 
 # Set of timesteps.
 TimeStart = 200 # RD: 0-200 has a lot of infeasible sea states
-TimeEnd = 230
+TimeEnd = 220
 Time = collect(TimeStart:TimeEnd)
 nTime = length(Time)
 
 # Set of weather conditions (12-hour timesteps, based on GEE analysis of Gulf of Maine data)
-weather_df = CSV.read("Data/gulf_of_maine_weather_states_12hourly.csv", DataFrame)
+weather_df = CSV.read("../Data/gulf_of_maine_weather_states_12hourly.csv", DataFrame)
 weatherSequence = weather_df.weather_state[TimeStart:TimeEnd]
 
 # Set of tasks
@@ -61,7 +61,7 @@ Tasks = ["moorInstall", "platformTow", "platformHookup", "cableInstall"] # names
 nTasks = length(Tasks)
 
 # Set of vessel types
-VesselTypes = CSV.read("Data/vessel_data.csv", DataFrame)
+VesselTypes = CSV.read("../Data/vessel_data.csv", DataFrame)
 nVesselTypes = nrow(VesselTypes)
 
 # Set of vessels (repeats each VesselType row numVessel times)
@@ -474,76 +474,76 @@ end
 
 savefig("cost_over_time.png")
 
-# Triangular grid sweep over the full weight simplex
-nSteps = 5  # gives 21 weight combinations
-results = []
-for i in 0:nSteps
-    for j in 0:nSteps-i
-        w1 = i / nSteps
-        w3 = j / nSteps
-        w2 = 1 - w1 - w3
-        local obj, x, z, t_end, emissions = optimizer(w1, w3; logLevel=0)
-        cost_obj = sum(x[ii,k,v,t]*taskCosts[v][k] for ii=1:nTurbines,
-                      k=1:nTasks, v=1:nVessels, t=1:nTime
-                      if taskCosts[v][k] < int_inf)
-        push!(results, (w1=w1, w2=w2, w3=w3,
-                        time_days=t_end*0.5,
-                        cost_k=cost_obj/1000,
-                        emissions_kg=emissions))
-    end
-end
+# # Triangular grid sweep over the full weight simplex
+# nSteps = 5  # gives 21 weight combinations
+# results = []
+# for i in 0:nSteps
+#     for j in 0:nSteps-i
+#         w1 = i / nSteps
+#         w3 = j / nSteps
+#         w2 = 1 - w1 - w3
+#         local obj, x, z, t_end, emissions = optimizer(w1, w3; logLevel=0)
+#         cost_obj = sum(x[ii,k,v,t]*taskCosts[v][k] for ii=1:nTurbines,
+#                       k=1:nTasks, v=1:nVessels, t=1:nTime
+#                       if taskCosts[v][k] < int_inf)
+#         push!(results, (w1=w1, w2=w2, w3=w3,
+#                         time_days=t_end*0.5,
+#                         cost_k=cost_obj/1000,
+#                         emissions_kg=emissions))
+#     end
+# end
 
-# Export results CSV for ternary plot — run plot_ternary.py to generate pareto_ternary.png
-results_df = DataFrame(results)
-CSV.write("pareto_results.csv", results_df)
+# # Export results CSV for ternary plot — run plot_ternary.py to generate pareto_ternary.png
+# results_df = DataFrame(results)
+# CSV.write("pareto_results.csv", results_df)
 
 
-####################################
-########## Results Summary #########
-####################################
+# ####################################
+# ########## Results Summary #########
+# ####################################
 
-scenarios = [
-    ("Pure Time",      x_time,  z_time,  t_end_time,  em_time),
-    ("Pure Emissions", x_emit,  z_emit,  t_end_emit,  em_emit),
-    ("Equal Weight",   x_equal, z_equal, t_end_equal, em_equal),
-]
+# scenarios = [
+#     ("Pure Time",      x_time,  z_time,  t_end_time,  em_time),
+#     ("Pure Emissions", x_emit,  z_emit,  t_end_emit,  em_emit),
+#     ("Equal Weight",   x_equal, z_equal, t_end_equal, em_equal),
+# ]
 
-println("\n" * "=" ^ 75)
-println("RESULTS SUMMARY")
-println("=" ^ 75)
-println("Scenario           | Duration  |   Vessel Cost |       Revenue |      Net Cost |   CO2 (kg)")
-println("-" ^ 75)
+# println("\n" * "=" ^ 75)
+# println("RESULTS SUMMARY")
+# println("=" ^ 75)
+# println("Scenario           | Duration  |   Vessel Cost |       Revenue |      Net Cost |   CO2 (kg)")
+# println("-" ^ 75)
 
-for (name, sx, sz, st_end, semissions) in scenarios
-    total_vessel_cost = sum(
-        round(Int, sx[i,k,v,t]) * taskCosts[v][k]
-        for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime
-        if taskCosts[v][k] < int_inf
-    )
+# for (name, sx, sz, st_end, semissions) in scenarios
+#     total_vessel_cost = sum(
+#         round(Int, sx[i,k,v,t]) * taskCosts[v][k]
+#         for i=1:nTurbines, k=1:nTasks, v=1:nVessels, t=1:nTime
+#         if taskCosts[v][k] < int_inf
+#     )
 
-    total_revenue = sum(
-        round(Int, sz[s,t]) * revenue * length(Str[s])
-        for s=1:nStrs, t=1:nTime
-    )
+#     total_revenue = sum(
+#         round(Int, sz[s,t]) * revenue * length(Str[s])
+#         for s=1:nStrs, t=1:nTime
+#     )
 
-    net_cost      = total_vessel_cost - total_revenue
-    duration_days = st_end * 0.5  # 12-hr timesteps → days
+#     net_cost      = total_vessel_cost - total_revenue
+#     duration_days = st_end * 0.5  # 12-hr timesteps → days
 
-    println(
-        rpad(name, 18) * " | " *
-        lpad(f"{duration_days:.1f}", 6) * " d | \$" *
-        lpad(f"{total_vessel_cost:.0f}", 13) * " | \$" *
-        lpad(f"{total_revenue:.0f}", 12) * " | \$" *
-        lpad(f"{net_cost:.0f}", 12) * " | " *
-        lpad(f"{semissions:.1f}", 10)
-    )
+#     println(
+#         rpad(name, 18) * " | " *
+#         lpad(f"{duration_days:.1f}", 6) * " d | \$" *
+#         lpad(f"{total_vessel_cost:.0f}", 13) * " | \$" *
+#         lpad(f"{total_revenue:.0f}", 12) * " | \$" *
+#         lpad(f"{net_cost:.0f}", 12) * " | " *
+#         lpad(f"{semissions:.1f}", 10)
+#     )
 
-    for s in 1:nStrs
-        t_complete = findfirst(t -> round(Int, sz[s,t]) == 1, 1:nTime)
-        if !isnothing(t_complete)
-            println(f"  → String {s} online: timestep {t_complete + TimeStart - 1} (day {t_complete * 0.5:.1f})")
-        end
-    end
-end
+#     for s in 1:nStrs
+#         t_complete = findfirst(t -> round(Int, sz[s,t]) == 1, 1:nTime)
+#         if !isnothing(t_complete)
+#             println(f"  → String {s} online: timestep {t_complete + TimeStart - 1} (day {t_complete * 0.5:.1f})")
+#         end
+#     end
+# end
 
-println("=" ^ 75)
+# println("=" ^ 75)
