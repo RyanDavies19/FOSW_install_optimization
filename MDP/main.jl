@@ -36,6 +36,10 @@ Base.@kwdef struct InstallSetting
     capable::Vector{Vector{Int}} = [[1], [2, 3], [4]] # K_j
     max_Hs::Dict{VesselType,Float64} =                # ORBIT limits (m)
         Dict(AHTS => 3.0, TUG => 3.0, CLV => 2.0)
+    r::Float64 = 1.0                                  # revenue per turbine per step
+    M::Float64 = 300.0                                # weather penalty at H_s = H^max
+    C_d::Float64 = 1.0                                # cost per disrupted step
+    γ::Float64 = 1.0                                  # discount (finite horizon)
     weather::DeterministicWeather
 end
 
@@ -200,6 +204,32 @@ actions(m::InstallSetting, s::State) = filter(a -> isfeasible(m, s, a), action_s
 
 # TODO: Ryan
 
-# Rewards
+# -----------------------------------------------------------------------------
+# 7. Rewards
+# -----------------------------------------------------------------------------
+# R(s, a) = R_weather(s, a) + R_d(s, a) + R_rev(s)
+# Objective: max_π E[ Σ_{t=1}^T γ^(t-1) R(s_t, a_t) ], with γ = 1.
 
-# TODO: Matthieu
+"H_s(w): upper bound of the wave-height interval of sea state w (Inf for w = 9)."
+Hs_upper(w::Int) = w == 9 ? Inf : DOUGLAS_UPPER[w+1]
+
+"R_rev(s) = r Σ_S |S| 1[p^(i) = P ∀ i ∈ S]: revenue of fully operating strings."
+function reward_revenue(m::InstallSetting, s::State)
+    P = total_work(m)
+    return m.r * sum(length(S) for S in m.strings if all(s.p[i] == P for i in S); init = 0)
+end
+
+"R_weather(s, a) = Σ_j 1[a^(j) ≠ 0] (1 - (1+M)^(H_s(w) / H^max_j)): -M at the vessel limit."
+function reward_weather(m::InstallSetting, s::State, a::Action)
+    Hs = Hs_upper(s.w)
+    return sum(1 - (1 + m.M)^(Hs / m.max_Hs[m.vtype[j]]) for j in vessels(m) if a[j] != 0; init = 0.0)
+end
+
+"R_d(s, a) = -C_d Σ_j 1[v^(j) ≠ 0 ∧ a^(j) = 0]: vessel mid-task that does not work."
+reward_disruption(m::InstallSetting, s::State, a::Action) =
+    -m.C_d * count(j -> s.v[j] != 0 && a[j] == 0, vessels(m))
+
+"Total reward R(s, a)."
+reward(m::InstallSetting, s::State, a::Action) =
+    reward_weather(m, s, a) + reward_disruption(m, s, a) + reward_revenue(m, s)
+
