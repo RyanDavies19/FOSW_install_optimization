@@ -4,3 +4,5 @@
 *.png
 *.log
 pareto_results.csv
+.DS_Store
+ignore/
