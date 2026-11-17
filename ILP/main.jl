@@ -147,7 +147,7 @@ taskCosts = [
 ]
 
 # Revenue per turbine once online 
-revenue = 9859.5 * 10^3 / 132 / 365 / 2 * 22.62 # (AEP in GWh) * (GWh / MWh) / (132 turbines) / (365 days/yr) / (2 periods / day) * (22.62 $/MWh) = $2314.47 per timestep
+revenue = 9859.5 * 10^3 / 132 / 365 / 2 * 80 # (AEP in GWh) * (GWh / MWh) / (132 turbines) / (365 days/yr) / (2 periods / day) * (80 $/MWh) = $2314.47 per timestep
 
 # Add in weather constraints for each vessel type
 maxWind  = Vessels.maxWind
