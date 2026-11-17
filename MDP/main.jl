@@ -27,6 +27,14 @@
 #    f(x, A)                                 `successor(m, x, A)`
 #    T(x′ | x, A)                            `transition(m, x, A, x′)`
 #    H_s(w), H^max_j                         `Hs_upper(w)`, `m.max_Hs[m.vtype[j]]`
+#    r, M_j, C_{d,j}                         `m.r`, `m.M[j]`, `m.C_d[j]`
+#
+#  Doc symbols that return ∅ are 0 in code (κ, ρ), since the task indices start at 1.
+#
+#  The solver is built from Chapter 7 of Kochenderfer, Wheeler & Wray, *Algorithms for
+#  Decision Making* (see MDP/dm_algorithms.jl). Section 8 below specializes `lookahead`,
+#  `greedy` and `backup` on this problem's value-function type and adds a finite-horizon
+#  `solve`, so the book's `ValueFunctionPolicy` works here unchanged.
 # =============================================================================
 
 using Printf
@@ -62,7 +70,7 @@ Base.@kwdef struct InstallSetting
     # All rewards in k$ per 12-h step.
     r::Float64 = 7.2                                 # revenue per turbine per step: 15 MW × 12 h × 50 % × 80 $/MWh
     # Day rates from Data/vessel_data.csv: A 107.187, B 37.516, C 41.171 k$/day.
-    M::Vector{Float64} = [322.0, 113.0, 123.5]        # M_j, weather penalty at H_s = H^max_j (3 × day rate)
+    M::Vector{Float64} = [322.0, 113.0, 123.5]        # M_j, weather penalty per vessel at H_s = H^max_j (3 × day rate)
     C_d::Vector{Float64} = [54.0, 19.0, 20.6]         # C_{d,j}, cost per disrupted step (day rate / 2)
     γ::Float64 = 1.0                                  # discount (finite horizon)
     weather::DeterministicWeather
@@ -88,6 +96,8 @@ function validate(m::InstallSetting)
     @assert all(k -> any(j -> k in m.capable[j], vessels(m)), tasks(m)) "every task needs a vessel"
     @assert length(m.weather.seq) >= m.T + 1 "need ŵ_1..ŵ_{T+1}"
     @assert all(w -> w in SEA_STATES, m.weather.seq)
+    @assert all(>(0), m.M) "M_j > 0, else the weather term rewards bad weather"
+    @assert all(>=(0), m.C_d) "C_{d,j} >= 0, else disruption is incentivized"
     return true
 end
 
@@ -225,7 +235,7 @@ end
 # -----------------------------------------------------------------------------
 # 4. Observations
 # -----------------------------------------------------------------------------
-# Phase 1: fully observable, o_t = x_t and O(o | x) = 1[o = x]  (doc eq. 16).
+# Phase 1: fully observable, o_t = x_t and O(o | x) = 1[o = x]  (doc eq. 18).
 # Phase 2: replace `observe` / `obs_prob` with a weather observation model
 # (e.g. forecasts); p and v stay fully observed.
 
@@ -237,14 +247,14 @@ obs_prob(m::InstallSetting, o::Observation, x::State) = o == x ? 1.0 : 0.0
 # -----------------------------------------------------------------------------
 # 5. Actions
 # -----------------------------------------------------------------------------
-# A = (a^(j))_{j ∈ 𝒥} ∈ 𝒜 = ({0} ∪ 𝒯)^|𝒥|   (doc eq. 5)
+# a^(j) ∈ {0} ∪ 𝒯                            (doc eq. 5)
+# A = (a^(j))_{j ∈ 𝒥} ∈ 𝒜 = ({0} ∪ 𝒯)^|𝒥|   (doc eq. 6)
 #   a^(j) = 0 : vessel j does not work this step
-#   a^(j) = i : vessel j works at turbine i (starts ρ(p^(i)) if idle,
-#               continues κ(p^(i)) if already there)
+#   a^(j) = i : vessel j works at turbine i, continuing κ(p^(i))
 
 const Action = Vector{Int}
 
-"Full action space 𝒜 (unconstrained), |𝒜| = (N+1)^|𝒥|."
+"Full action space 𝒜 (unconstrained), |𝒜| = (N+1)^|𝒥|  (doc eq. 6)."
 action_space(m::InstallSetting) =
     [collect(c) for c in Iterators.product(ntuple(_ -> 0:m.nturb, nvessels(m))...)]
 
@@ -266,6 +276,18 @@ Returns
 -------
 Bool
     True if vessel j may take a^(j) = i for every j.
+
+Notes
+-----
+The five rules enforced in this function are:
+
+====  ==========================================================================
+F1    at most one vessel per turbine per step
+F2    vessel j may only work tasks in K_j, i.e. κ(p^(i)) ∈ K_j
+F3    no work on a completed turbine (p^(i) = P)
+F4    a committed vessel cannot switch turbines: v^(j) ∈ {0, i}
+F5    a vessel cannot start at a turbine another vessel already holds
+====  ==========================================================================
 """
 function isfeasible(m::InstallSetting, x::State, A::Action)
     P = total_work(m)
@@ -275,13 +297,13 @@ function isfeasible(m::InstallSetting, x::State, A::Action)
         # which is the same as `if <boolean expression> then return false`
         i = A[j]
         i == 0 && continue
-        i in busy && return false    # if i is busy, not feasible
-        push!(busy, i)               # if i not busy, add it to busy (turbine cannot have 2 actions simultaneously)
-        x.p[i] == P && return false  # if turbine complete
+        i in busy && return false    # F1 if i is busy, not feasible
+        push!(busy, i)               # if i not busy, add it to busy
+        x.p[i] == P && return false  # F3 if turbine complete
         k = current_task(m, x.p[i])
-        (k == 0 || !(k in m.capable[j])) && return false # current task not feasible
-        (x.v[j] != 0 && x.v[j] != i) && return false     # vessel is active at another turbine
-        any(j2 -> j2 != j && x.v[j2] == i, vessels(m)) && return false  # any other vessels active on this turbine
+        (k == 0 || !(k in m.capable[j])) && return false # F2 current task not feasible
+        (x.v[j] != 0 && x.v[j] != i) && return false     # F4 vessel active at another turbine
+        any(j2 -> j2 != j && x.v[j2] == i, vessels(m)) && return false  # F5 turbine already held
     end
     return true
 end
@@ -297,7 +319,7 @@ actions(m::InstallSetting, x::State) = filter(A -> isfeasible(m, x, A), action_s
 """
     work_indicator(m, A, i)
 
-η^(i)(A): is turbine i worked this step?  (doc eq. 6)
+η^(i)(A): is turbine i worked this step?  (doc eq. 7)
 
 Parameters
 ----------
@@ -318,7 +340,7 @@ work_indicator(m::InstallSetting, A::Action, i::Int) = any(==(i), A)
 """
     at_boundary(m, p)
 
-β(p): does is p at the end of a task?  (doc eq. 6)
+β(p): does is p at the end of a task?  (doc eq. 7)
 Equivalent to `ready_task(m,p) != 0 || is_operating(m,p)` because q_{k+1} = q_k + D_k.
 
 Parameters
@@ -339,7 +361,7 @@ at_boundary(m::InstallSetting, p::Int) =
 """
     successor(m, x, A)
 
-x′ = f(x, A), the deterministic next state (doc eqs. 7-10, for phase 1).
+x′ = f(x, A), the deterministic next state (doc eqs. 8-11, for phase 1).
 
 At most one vessel per turbine, so η is the incremental increase.
 
@@ -366,7 +388,7 @@ end
 """
     transition(m, x, A, x′)
 
-T(x′ | x, A) = 1[x′ = f(x, A)]  (doc eq. 11).
+T(x′ | x, A) = 1[x′ = f(x, A)]  (doc eq. 12).
 
 Parameters
 ----------
@@ -395,35 +417,47 @@ transition(m::InstallSetting, x::State, A::Action, x′::State) =
 # -----------------------------------------------------------------------------
 # 7. Rewards
 # -----------------------------------------------------------------------------
-# R(x, A) = R_weather(x, A) + R_d(x, A) + R_rev(x)   (doc eq. 15)
-# Objective: max_π E[ Σ_{t=1}^T γ^(t-1) R(x_t, A_t) ], with γ = 1.
+# R(x, A) = R_weather(x, A) + R_d(x, A) + R_rev(x)       (doc eq. 16)
+# Objective: max_π E[ Σ_{t=1}^T γ^(t-1) R(x_t, A_t) ], with γ = 1   (doc eq. 17)
+# All terms are in k$ per 12-h step.
 
 "H_s(w): upper bound of the wave-height interval of sea state w (Inf for w = 9)."
 Hs_upper(w::Int) = w == 9 ? Inf : DOUGLAS_UPPER[w+1]
 
-"R_rev(x) = r Σ_S |S| 1[p^(i) = P ∀ i ∈ S]: revenue of fully operating strings (doc eq. 12)."
+"R_rev(x) = r Σ_S |S| 1[p^(i) = P ∀ i ∈ S]: revenue of fully operating strings (doc eq. 13)."
 function reward_revenue(m::InstallSetting, x::State)
     P = total_work(m)
     return m.r * sum(length(S) for S in m.strings if all(x.p[i] == P for i in S); init = 0)
 end
 
-"R_weather(x, A) = Σ_j 1[a^(j) ≠ 0] (1 - (1+M)^(H_s(w) / H^max_j)): -M at the vessel limit (doc eq. 13)."
+"R_weather(x, A) = Σ_j 1[a^(j) ≠ 0] (1 - (1+M_j)^(H_s(w) / H^max_j)): -M_j at the limit (doc eq. 14)."
 function reward_weather(m::InstallSetting, x::State, A::Action)
     Hs = Hs_upper(x.w)
-    return sum(1 - (1 + m.M)^(Hs / m.max_Hs[m.vtype[j]]) for j in vessels(m) if A[j] != 0; init = 0.0)
+    return sum(1 - (1 + m.M[j])^(Hs / m.max_Hs[m.vtype[j]])
+               for j in vessels(m) if A[j] != 0; init = 0.0)
 end
 
-"R_d(x, A) = -C_d Σ_j 1[v^(j) ≠ 0 ∧ a^(j) = 0]: vessel mid-task that does not work (doc eq. 14)."
+"R_d(x, A) = -Σ_j C_{d,j} 1[v^(j) ≠ 0 ∧ a^(j) = 0]: vessel mid-task that does not work (doc eq. 15)."
 reward_disruption(m::InstallSetting, x::State, A::Action) =
-    -m.C_d * count(j -> x.v[j] != 0 && A[j] == 0, vessels(m))
+    -sum(m.C_d[j] for j in vessels(m) if x.v[j] != 0 && A[j] == 0; init = 0.0)
 
-"Total reward R(x, A)."
+"Total reward R(x, A)  (doc eq. 16)."
 reward(m::InstallSetting, x::State, A::Action) =
     reward_weather(m, x, A) + reward_disruption(m, x, A) + reward_revenue(m, x)
 
 # -----------------------------------------------------------------------------
 # 8. Exact solution: finite-horizon backward induction
 # -----------------------------------------------------------------------------
+# The book's generic methods take `U` untyped; ours take `U::LayeredValue`, which
+# is more specific, so Julia dispatches to these without the book's file being edited:
+#
+#   book 7.2  lookahead(𝒫, U, s, a)  ->  lookahead(𝒫, U::LayeredValue, x, A)
+#   book 7.5  greedy(𝒫, U, s)        ->  greedy(𝒫, U::LayeredValue, x)
+#   book 7.7  backup(𝒫, U, s)        ->  backup(𝒫, U::LayeredValue, x)
+#
+# `solve(BackwardInduction, 𝒫)` below then plays the part of the book's Algorithm 7.8
+# `solve(ValueIteration, 𝒫)`, which is not copied into dm_algorithms.jl because it is not
+# usable at this scale — see `lookahead` and `BackwardInduction` for why.
 
 """
     xindex(m, p, v)
@@ -468,7 +502,7 @@ xindex(m::InstallSetting, x::State) = xindex(m, x.p, x.v)
 """
     build_mdp(m)
 
-Wrap an `InstallSetting` in the textbook's MDP container.
+Wrap an `InstallSetting` in the textbook's MDP container (Algorithm 7.1).
 
 Parameters
 ----------
@@ -478,7 +512,7 @@ m : InstallSetting
 Returns
 -------
 MDP
-    Algorithm 7.1 container (MDP/dm_algorithms.jl) with fields γ, 𝒮, 𝒜, T, R, TR.
+    Algorithm 7.1 container with fields γ, 𝒮, 𝒜, T, R, TR.
 
 Notes
 -----
@@ -486,7 +520,7 @@ The field mapping is direct. `transition` already has the book's T(s, a, s′) a
 and `TR` is the sample-transition-and-reward pair the Chapter 9 online methods expect, which
 is trivial here because the transition is deterministic.
 
-`𝒮` is populated for faithfulness, but the specialized `lookahead` below never iterates it.
+`𝒮` is populated but the functions below never iterate it.
 """
 build_mdp(m::InstallSetting) = MDP(
     m.γ,
@@ -505,14 +539,16 @@ The value function as a (state index × time) table, callable as `U(x)`.
 Parameters
 ----------
 m : InstallSetting
-    Problem definition, used for `xindex`.
+    Problem definition, used for `xindex` and for the feasibility test in `greedy`.
 U : Matrix{Float64}
     Values with `T + 1` columns; the last is the terminal value and stays zero.
 
 Notes
 -----
-Being callable is what satisfies the textbook's value-function interface. The matrix is held
-by reference, so writes made during the sweep are visible immediately.
+Being callable is what satisfies the book's value-function interface, so `lookahead`,
+`greedy`, `backup` and `ValueFunctionPolicy` all accept it. Carrying `m` is what lets the
+specializations below restrict to A(x) without an extra argument. The matrix is held by
+reference, so writes made during the sweep are visible immediately.
 """
 struct LayeredValue
     m::InstallSetting
@@ -523,7 +559,7 @@ end
 """
     lookahead(𝒫, U::LayeredValue, x, A)
 
-Specialization of Algorithm 7.2 for this problem's deterministic transition.
+Algorithm 7.2 specialized for this problem's deterministic transition.
 
 Parameters
 ----------
@@ -545,103 +581,132 @@ Notes
 -----
 The book's `lookahead` computes `R(s,a) + γ Σ_{s′∈𝒮} T(s,a,s′) U(s′)`. With T a point mass
 that sum has exactly one non-zero term, so it is identically `U(f(x,A))` — an exact rewrite,
-not an approximation. It is also the difference between a usable solver and an unusable one:
-the generic version touches all 67,797 states per state-action pair, making
-`solve(ValueIteration(k), 𝒫)` cost roughly k · 1.2e11 operations.
-
-Dispatches ahead of both book methods because `LayeredValue` is more specific than their
-untyped `U` and their `U::Vector`.
+not an approximation. This is required to keep it solvable. The original alg. uses all 67,797 
+states per state-action pair, Algorithm 7.8 value iteration cost roughly k · 1.2e11 operations 
+for k sweeps. That is why we make a custom lookahead here.
 """
 lookahead(𝒫::MDP, U::LayeredValue, x::State, A::Action) =
     𝒫.R(x, A) + 𝒫.γ * U(successor(U.m, x, A))
 
 """
-    greedy_feasible(𝒫, m, U, x)
+    greedy(𝒫, U::LayeredValue, x)
 
-Algorithm 7.5's `greedy`, restricted to A(x) and returning the action's index.
+Algorithm 7.5's `greedy`, restricted to the feasible set A(x).
 
 Parameters
 ----------
 𝒫 : MDP
     Textbook problem container.
-m : InstallSetting
-    Problem definition, used for the feasibility test.
 U : LayeredValue
-    Current value table.
+    Current value table; its `m` supplies the feasibility test.
 x : State
     State to act from.
 
 Returns
 -------
 NamedTuple
-    `(ai, u)`: index of the best joint action in `𝒫.𝒜`, and its value.
+    `(a, u)`: the best feasible joint action and its value — the same shape the book returns,
+    so `ValueFunctionPolicy` works unmodified.
 
 Notes
 -----
-The textbook `MDP` carries one global `𝒜` with no per-state feasible set, so the restriction
+The book's `MDP` carries one global `𝒜` with no per-state feasible set, so the restriction
 has to happen here. Filtering is used rather than an `-Inf` reward for infeasible actions:
 inside the book's generic `lookahead`, `0.0 * -Inf` is `NaN`, and `findmax` over NaNs
-silently returns the first index. A(x) is never empty — all-idle always passes F1-F5.
+silently returns the first index. A(x) is never empty — all-idle always passes F1-F5, and it
+is `𝒫.𝒜[1]`, so it is also the fallback.
 """
-function greedy_feasible(𝒫::MDP, m::InstallSetting, U, x::State)
-    best_u, best_ai = -Inf, 1
-    for (ai, A) in enumerate(𝒫.𝒜)
-        isfeasible(m, x, A) || continue
+function greedy(𝒫::MDP, U::LayeredValue, x::State)
+    best_a, best_u = 𝒫.𝒜[1], -Inf
+    for A in 𝒫.𝒜
+        isfeasible(U.m, x, A) || continue
         u = lookahead(𝒫, U, x, A)
         if u > best_u
-            best_u, best_ai = u, ai
+            best_a, best_u = A, u
         end
     end
-    return (ai = best_ai, u = best_u)
+    return (a = best_a, u = best_u)
 end
 
 """
-    backward_induction(m)
+    backup(𝒫, U::LayeredValue, x)
 
-Exact finite-horizon dynamic programming, built on the textbook structures above.
+Algorithm 7.7's `backup`, restricted to the feasible set A(x).
+
+Parameters
+----------
+𝒫 : MDP
+    Textbook problem container.
+U : LayeredValue
+    Current value table.
+x : State
+    State to back up.
+
+Returns
+-------
+Float64
+    max over A ∈ A(x) of the lookahead value — the book's `backup` with `𝒜` replaced by A(x).
+"""
+backup(𝒫::MDP, U::LayeredValue, x::State) = greedy(𝒫, U, x).u
+
+"""
+    BackwardInduction(m)
+
+Finite-horizon solver in the shape of the book's Algorithm 7.8, `ValueIteration`.
 
 Parameters
 ----------
 m : InstallSetting
-    Problem definition.
+    Problem definition; supplies the horizon and the per-step state layers.
+"""
+struct BackwardInduction
+    m::InstallSetting
+end
+
+"""
+    solve(M::BackwardInduction, 𝒫)
+
+One reverse sweep of `backup` over the time layers, returning the book's policy type.
+
+Parameters
+----------
+M : BackwardInduction
+    Solver settings (the `InstallSetting`).
+𝒫 : MDP
+    Problem container from `build_mdp`.
 
 Returns
 -------
-U : Matrix{Float64}
-    Values, `(state index) × (T + 1)`. Column `T + 1` is terminal and stays zero.
-Π : Matrix{Int}
-    Optimal action index into `𝒜`, `(state index) × T`.
-𝒜 : Vector{Action}
-    The action space, in the order `Π` indexes.
+ValueFunctionPolicy
+    Algorithm 7.5's policy. Call it as `π(x)` for the optimal joint action; read values off
+    `π.U(x)`.
 
 Notes
 -----
-Because t is part of the state and advances by exactly one each step, the chain is a layered
-DAG, so one reverse sweep over `states_at(m, t)` is exact rather than iterative. That is why
-this uses a single pass instead of `solve(ValueIteration(k_max), 𝒫)`: value iteration would
-need T sweeps to propagate information back from the horizon and each sweep would pay the
-full Σ over 𝒮. Backward induction costs |X| · |𝒜| ≈ 1.8e6 lookups and runs in under a second.
+This makes the same three moves as the book's Algorithm 7.8 (p. 142) — zero the values, back
+up every state repeatedly, wrap the result in a `ValueFunctionPolicy` — with 7.8's loop over
+`k = 1:k_max` replaced by one pass over t = T … 1. Column T+1 is the terminal value and
+stays zero. Cost is |X| · |𝒜| ≈ 1.8e6 lookups, under a second.
 """
-function backward_induction(m::InstallSetting)
-    𝒫  = build_mdp(m)
-    nX = state_bound_per_step(m)
-    U  = zeros(Float64, nX, m.T + 1)   # column T+1 is the terminal value, all zeros
-    Π  = ones(Int, nX, m.T)
+function solve(M::BackwardInduction, 𝒫::MDP)
+    m  = M.m
+    U  = zeros(Float64, state_bound_per_step(m), m.T + 1)
     Uf = LayeredValue(m, U)
     for t in m.T:-1:1, x in states_at(m, t)
-        g = greedy_feasible(𝒫, m, Uf, x)
-        U[xindex(m, x), t] = g.u
-        Π[xindex(m, x), t] = g.ai
+        U[xindex(m, x), t] = backup(𝒫, Uf, x)
     end
-    return U, Π, 𝒫.𝒜
+    return ValueFunctionPolicy(𝒫, Uf)
 end
+
+"Solve `m` exactly and return Algorithm 7.5's `ValueFunctionPolicy`."
+backward_induction(m::InstallSetting) = solve(BackwardInduction(m), build_mdp(m))
 
 # -----------------------------------------------------------------------------
 # 9. Rollout and Gantt chart
 # -----------------------------------------------------------------------------
 
 """
-    rollout(m, Π, 𝒜)
+    rollout(m, π)
 
 Run the policy forward from x_1.
 
@@ -649,10 +714,8 @@ Parameters
 ----------
 m : InstallSetting
     Problem definition.
-Π : Matrix{Int}
-    Policy from `backward_induction`.
-𝒜 : Vector{Action}
-    Action space `Π` indexes into.
+π : ValueFunctionPolicy
+    Policy from `solve`/`backward_induction`; `π(x)` gives the joint action.
 
 Returns
 -------
@@ -669,12 +732,12 @@ Notes
 line up. It is named `active` here because `x` is the state in this file. The task is read
 off κ(p^(i)) *before* the increment.
 """
-function rollout(m::InstallSetting, Π, 𝒜)
+function rollout(m::InstallSetting, π::ValueFunctionPolicy)
     x = initial_state(m)
     traj = Tuple{State,Action}[]
     active = falses(m.nturb, length(m.durations), nvessels(m), m.T)
     for t in 1:m.T
-        A = 𝒜[Π[xindex(m, x), t]]
+        A = π(x)
         push!(traj, (x, copy(A)))
         for j in vessels(m)
             i = A[j]
@@ -737,8 +800,9 @@ and prices in R_weather but the ILP forbids outright.
 function print_gantt(io::IO, m::InstallSetting, active; t0::Int = 200)
     hdr  = "Turbine |       Task       | Vessel |" * join([@sprintf(" %2d", t) for t in 1:m.T])
     rule = "-"^length(hdr)
-    @printf(io, "--- MDP Gantt Chart (start time: %d, r=%.2f, M=%.1f, C_d=%.1f) ---\n",
-            t0, m.r, m.M, m.C_d)
+    vec_str(v) = "(" * join((@sprintf("%.1f", z) for z in v), ",") * ")"
+    @printf(io, "--- MDP Gantt Chart (start time: %d, r=%.1f, M_j=%s, C_dj=%s, all k\$) ---\n",
+            t0, m.r, vec_str(m.M), vec_str(m.C_d))
     println(io, hdr)
     println(io, rule)
     print(io, "        |                  |        |")
@@ -805,20 +869,24 @@ end
 # -----------------------------------------------------------------------------
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    # t0 matches ILP/main.jl:50. The ILP's own window is 21 steps (rows 200-220);
-    # T = 30 covers it and extends past it.
-    t0, T = 200, 30
+    # t0 matches ILP/main.jl:50. The ILP's own window is 21 steps (rows 200-220).
+    #
+    # T = 40, not 30. Revenue only accrues once the whole string is operating, and in this
+    # window the CLV's only affordable cable weather (sea state <= 3) is steps 23-29, so the
+    # string cannot come online before step 29. At T <= 35 there is no runway left to repay
+    # the install cost and the optimal policy is to do nothing (V* = 0, empty chart). From
+    # T = 40 the schedule is fixed and V* grows by exactly r*|S| = 14.4 k$ per added step.
+    t0, T = 200, 40
 
-    # Revenue in ILP dollars: $ per turbine per 12-h step, from ILP/main.jl:150
-    # (9859.5 GWh AEP / 132 turbines / 365 d / 2 steps per day × $22.62/MWh).
-    # The InstallSetting default r = 1.0 is a placeholder that leaves R_weather dominating
-    # R_rev, under which the optimal policy is to do nothing and the Gantt comes out empty.
-    # M stays at its default 300.0 and is the knob to tune from here.
-    m = InstallSetting(T = T, r = 2314.47, weather = load_weather(t0 = t0, T = T))
+    # Reward parameters are the InstallSetting defaults: r = 7.2 k$ per turbine per step,
+    # M_j = (322, 113, 123.5) k$, C_{d,j} = (54, 19, 20.6) k$, day rates from
+    # Data/vessel_data.csv. Nothing is overridden here.
+    m = InstallSetting(T = T, weather = load_weather(t0 = t0, T = T))
     validate(m)
 
-    el = @elapsed ((U, Π, 𝒜) = backward_induction(m))
-    traj, active, x_final = rollout(m, Π, 𝒜)
+    𝒫 = build_mdp(m)
+    el = @elapsed (π = solve(BackwardInduction(m), 𝒫))
+    traj, active, x_final = rollout(m, π)
 
     # The chart itself, in the ILP's layout.
     print_gantt(stdout, m, active; t0 = t0)
@@ -828,19 +896,21 @@ if abspath(PROGRAM_FILE) == @__FILE__
     rw = sum(reward_weather(m, x, A)    for (x, A) in traj)
     rd = sum(reward_disruption(m, x, A) for (x, A) in traj)
     rr = sum(reward_revenue(m, x)       for (x, _) in traj)
+    nover = count(active[i, k, j, t] && over_limit(m, j, m.weather.seq[t])
+                  for i in turbines(m), k in tasks(m), j in vessels(m), t in 1:m.T)
 
     println()
     @printf("states/step = %d   |𝒜| = %d   backward induction %.2f s\n",
-            state_bound_per_step(m), length(𝒜), el)
-    @printf("V*(x_1) = %.2f   (weather %.2f | disruption %.2f | revenue %.2f)\n",
-            U[xindex(m, initial_state(m)), 1], rw, rd, rr)
-    @printf("final progress p = %s  (P = %d), worked vessel-steps = %d\n",
-            string(Tuple(x_final.p)), total_work(m), count(active))
+            state_bound_per_step(m), length(𝒫.𝒜), el)
+    @printf("V*(x_1) = %.2f k\$   (weather %.2f | disruption %.2f | revenue %.2f)\n",
+            π.U(initial_state(m)), rw, rd, rr)
+    @printf("final progress p = %s  (P = %d), worked vessel-steps = %d, over-limit steps = %d\n",
+            string(Tuple(x_final.p)), total_work(m), count(active), nover)
     println(done === nothing ? "string never completed within the horizon" :
             "all turbines operating from step $(done)")
 
     any(active) || @warn """EMPTY schedule — the optimal policy is to do nothing.
-        R_weather dominates R_rev. Raise r or lower M."""
+        R_weather dominates R_rev. Raise r or lower M_j."""
 
     println("wrote ", write_gantt(m, active; t0 = t0))
 end
