@@ -36,9 +36,11 @@ Base.@kwdef struct InstallSetting
     capable::Vector{Vector{Int}} = [[1], [2, 3], [4]] # K_j
     max_Hs::Dict{VesselType,Float64} =                # ORBIT limits (m)
         Dict(AHTS => 3.0, TUG => 3.0, CLV => 2.0)
-    r::Float64 = 1.0                                  # revenue per turbine per step
-    M::Float64 = 300.0                                # weather penalty at H_s = H^max
-    C_d::Float64 = 1.0                                # cost per disrupted step
+    # All rewards in k$ per 12-h step.
+    r::Float64 = 7.2                                 # revenue per turbine per step: 15 MW × 12 h × 50 % × 80 $/MWh
+    # Day rates from Data/vessel_data.csv: A 107.187, B 37.516, C 41.171 k$/day.
+    M::Vector{Float64} = [322.0, 113.0, 123.5]        # M_j, weather penalty at H_s = H^max_j (3 × day rate)
+    C_d::Vector{Float64} = [54.0, 19.0, 20.6]         # C_{d,j}, cost per disrupted step (day rate / 2)
     γ::Float64 = 1.0                                  # discount (finite horizon)
     weather::DeterministicWeather
 end
@@ -56,7 +58,7 @@ offsets(m::InstallSetting) = [0; cumsum(m.durations)[1:end-1]]
 
 "Check that the setting is well formed."
 function validate(m::InstallSetting)
-    @assert length(m.vname) == length(m.vtype) == length(m.capable)
+    @assert length(m.vname) == length(m.vtype) == length(m.capable) == length(m.M) == length(m.C_d)
     @assert all(d -> d >= 1, m.durations)
     @assert sort(vcat(m.strings...)) == collect(turbines(m)) "strings must partition I"
     @assert all(k -> k in tasks(m), vcat(m.capable...))
@@ -219,15 +221,15 @@ function reward_revenue(m::InstallSetting, s::State)
     return m.r * sum(length(S) for S in m.strings if all(s.p[i] == P for i in S); init = 0)
 end
 
-"R_weather(s, a) = Σ_j 1[a^(j) ≠ 0] (1 - (1+M)^(H_s(w) / H^max_j)): -M at the vessel limit."
+"R_weather(s, a) = Σ_j 1[a^(j) ≠ 0] (1 - (1+M_j)^(H_s(w) / H^max_j)): -M_j at the vessel limit."
 function reward_weather(m::InstallSetting, s::State, a::Action)
     Hs = Hs_upper(s.w)
-    return sum(1 - (1 + m.M)^(Hs / m.max_Hs[m.vtype[j]]) for j in vessels(m) if a[j] != 0; init = 0.0)
+    return sum(1 - (1 + m.M[j])^(Hs / m.max_Hs[m.vtype[j]]) for j in vessels(m) if a[j] != 0; init = 0.0)
 end
 
-"R_d(s, a) = -C_d Σ_j 1[v^(j) ≠ 0 ∧ a^(j) = 0]: vessel mid-task that does not work."
+"R_d(s, a) = -Σ_j C_{d,j} 1[v^(j) ≠ 0 ∧ a^(j) = 0]: vessel mid-task that does not work."
 reward_disruption(m::InstallSetting, s::State, a::Action) =
-    -m.C_d * count(j -> s.v[j] != 0 && a[j] == 0, vessels(m))
+    -sum(m.C_d[j] for j in vessels(m) if s.v[j] != 0 && a[j] == 0; init = 0.0)
 
 "Total reward R(s, a)."
 reward(m::InstallSetting, s::State, a::Action) =
